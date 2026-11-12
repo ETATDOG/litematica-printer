@@ -1,222 +1,128 @@
 package me.aleksilassila.litematica.printer.render;
 
-import java.util.List;
-import net.minecraft.client.Minecraft;
-import net.minecraft.client.gui.Font;
-//#if MC >= 12000
-import net.minecraft.client.gui.GuiGraphics;
-//#else
-//$$ import net.minecraft.client.gui.GuiComponent;
-//$$ import com.mojang.blaze3d.vertex.PoseStack;
-//#endif
-import net.minecraft.locale.Language;
-import net.minecraft.world.item.ItemStack;
-import fi.dy.masa.litematica.render.infohud.IInfoHudRenderer;
-import fi.dy.masa.litematica.render.infohud.RenderPhase;
-import fi.dy.masa.malilib.config.HudAlignment;
-import fi.dy.masa.malilib.util.GuiUtils;
-import me.aleksilassila.litematica.printer.config.Configs;
+import me.aleksilassila.litematica.printer.I18n;
 import me.aleksilassila.litematica.printer.printer.MissingMaterialTracker;
+import me.aleksilassila.litematica.printer.utils.render.Render2DUtils;
+import net.minecraft.client.Minecraft;
+import net.minecraft.world.item.ItemStack;
 
-public class MissingMaterialHudRenderer implements IInfoHudRenderer
-{
+import java.awt.Color;
+import java.util.List;
+
+/**
+ * Renders missing materials through the printer's own HUD entry point.
+ * This keeps it independent from Litematica's optional InfoHud lifecycle.
+ */
+public final class MissingMaterialHudRenderer {
     public static final MissingMaterialHudRenderer INSTANCE = new MissingMaterialHudRenderer();
 
-    private static final int LINE_HEIGHT = 16;
     private static final int MAX_DISPLAY_ITEMS = 10;
-    private static final int BG_COLOR = 0xA0000000;
-    private static final int TEXT_COLOR = 0xFFFFFFFF;
-    private static final int TEXT_COLOR_GRAY = 0xFF808080;
+    private static final int PADDING = 3;
+    private static final int TITLE_HEIGHT = 14;
+    private static final int ITEM_ROW_HEIGHT = 18;
+    private static final int OVERFLOW_HEIGHT = 12;
+    private static final int ICON_TEXT_GAP = 20;
+    private static final Color BACKGROUND = new Color(0, 0, 0, 110);
+    private static final Color TITLE_COLOR = new Color(255, 120, 120, 255);
+    private static final Color TEXT_COLOR = new Color(255, 255, 255, 255);
+    private static final Color MUTED_TEXT_COLOR = new Color(160, 160, 160, 255);
 
-    @Override
-    public boolean getShouldRenderText(RenderPhase phase)
-    {
-        return false;
+    private MissingMaterialHudRenderer() {
     }
 
-    @Override
-    public boolean getShouldRenderCustom()
-    {
-        if (!Configs.Core.MISSING_MATERIAL_HUD.getBooleanValue()) return false;
-        return MissingMaterialTracker.getInstance().hasMissing();
-    }
-
-    @Override
-    public boolean shouldRenderInGuis()
-    {
-        return true;
-    }
-
-    @Override
-    public List<String> getText(RenderPhase phase)
-    {
-        return List.of();
-    }
-
-    //#if MC >= 12106
-    public int render(GuiGraphics drawContext, int xOffset, int yOffset, HudAlignment alignment)
-    //#elseif MC >= 12000
-    //$$ public int render(int xOffset, int yOffset, HudAlignment alignment, GuiGraphics drawContext)
-    //#else
-    //$$ public int render(int xOffset, int yOffset, HudAlignment alignment, PoseStack matrixStack)
-    //#endif
-    {
-        MissingMaterialTracker tracker = MissingMaterialTracker.getInstance();
-        List<MissingMaterialTracker.Entry> missing = tracker.getMissing();
-        if (missing.isEmpty()) return 0;
-
-        int totalTypes = tracker.size();
-        int displayCount = Math.min(missing.size(), MAX_DISPLAY_ITEMS);
-        boolean showOverflow = missing.size() > MAX_DISPLAY_ITEMS;
+    public void render(
+            float screenWidth,
+            float screenHeight,
+            int preferredX,
+            int preferredY,
+            float scale,
+            int minimumWidth
+    ) {
+        List<MissingMaterialTracker.Entry> entries = MissingMaterialTracker.getRuntime().snapshot();
+        if (entries.isEmpty()) {
+            return;
+        }
 
         Minecraft mc = Minecraft.getInstance();
-        Font font = mc.font;
+        int displayCount = Math.min(entries.size(), MAX_DISPLAY_ITEMS);
+        boolean hasOverflow = entries.size() > displayCount;
+        String title = I18n.MISSING_MATERIAL_TITLE.getName(entries.size()).getString();
+        String overflow = hasOverflow
+                ? I18n.MISSING_MATERIAL_OVERFLOW.getName(entries.size() - displayCount).getString()
+                : "";
 
-        int bgMargin = 2;
-        int contentHeight = (displayCount * LINE_HEIGHT) + LINE_HEIGHT;
-        if (showOverflow) contentHeight += LINE_HEIGHT;
-
-        int maxTextLength = 0;
-        for (int i = 0; i < displayCount; i++) {
-            maxTextLength = Math.max(maxTextLength, font.width(getItemName(missing.get(i))));
+        int contentWidth = mc.font.width(title);
+        for (int index = 0; index < displayCount; index++) {
+            contentWidth = Math.max(contentWidth,
+                    ICON_TEXT_GAP + mc.font.width(entries.get(index).displayName().getString()));
         }
-        String title = String.format(Language.getInstance().getOrDefault("litematica-printer.hud.missing.title"), totalTypes);
-        int titleWidth = font.width(title);
-        maxTextLength = Math.max(maxTextLength, titleWidth);
-        final int maxLineLength = maxTextLength + 20;
-
-        int posX = xOffset + bgMargin;
-        switch (alignment) {
-            case TOP_RIGHT:
-            case BOTTOM_RIGHT:
-                posX = GuiUtils.getScaledWindowWidth() - maxLineLength - xOffset - bgMargin;
-                break;
-            case CENTER:
-                posX = (int) (GuiUtils.getScaledWindowWidth() / 2.0 - maxLineLength / 2.0 - xOffset);
-                break;
-            default:
-                break;
+        if (hasOverflow) {
+            contentWidth = Math.max(contentWidth, mc.font.width(overflow));
         }
 
-        int posY = yOffset + bgMargin;
-        {
-            int scaledHeight = GuiUtils.getScaledWindowHeight();
-            if (alignment == HudAlignment.BOTTOM_RIGHT || alignment == HudAlignment.BOTTOM_LEFT) {
-                posY = scaledHeight - posY - contentHeight;
-            } else if (alignment == HudAlignment.CENTER) {
-                posY = (int) (scaledHeight / 2.0 - contentHeight / 2.0 + posY);
-            }
+        int panelWidth = contentWidth + PADDING * 2;
+        int panelHeight = PADDING * 2 + TITLE_HEIGHT + displayCount * ITEM_ROW_HEIGHT
+                + (hasOverflow ? OVERFLOW_HEIGHT : 0);
+        int scaledPanelWidth = Math.max(1, Math.round(panelWidth * scale));
+        int scaledPanelHeight = Math.max(1, Math.round(panelHeight * scale));
+        int renderedWidth = Math.max(minimumWidth, scaledPanelWidth);
+        int drawX = clampToScreen(preferredX, renderedWidth, (int) screenWidth);
+        int drawY = clampToScreen(preferredY, scaledPanelHeight, (int) screenHeight);
+
+        Render2DUtils.fill(drawX, drawY, drawX + renderedWidth, drawY + scaledPanelHeight, BACKGROUND);
+        Render2DUtils.drawStringScaled(
+                title,
+                drawX + Math.round(PADDING * scale),
+                drawY + Math.round((PADDING + 1) * scale),
+                TITLE_COLOR,
+                true,
+                scale
+        );
+
+        int rowY = PADDING + TITLE_HEIGHT;
+        for (int index = 0; index < displayCount; index++) {
+            MissingMaterialTracker.Entry entry = entries.get(index);
+            drawItemScaled(
+                    entry.iconStack(),
+                    drawX + Math.round(PADDING * scale),
+                    drawY + Math.round(rowY * scale),
+                    scale
+            );
+            Render2DUtils.drawStringScaled(
+                    entry.displayName().getString(),
+                    drawX + Math.round((PADDING + ICON_TEXT_GAP) * scale),
+                    drawY + Math.round((rowY + 4) * scale),
+                    TEXT_COLOR,
+                    true,
+                    scale
+            );
+            rowY += ITEM_ROW_HEIGHT;
         }
-
-        int x1 = posX - bgMargin;
-        int y1 = posY - bgMargin;
-        int x2 = x1 + maxLineLength + bgMargin * 2;
-        int y2 = y1 + contentHeight + bgMargin;
-
-        //#if MC >= 12000
-        drawContext.fill(x1, y1, x2, y2, BG_COLOR);
-
-        drawContext.drawString(font, title,
-                posX + 2, posY + 2, TEXT_COLOR, true);
-
-        int itemIconX = posX;
-        int itemTextX = posX + 18;
-        int itemY = posY + 16;
-        for (int i = 0; i < displayCount; i++) {
-            MissingMaterialTracker.Entry entry = missing.get(i);
-            ItemStack stack = entry.item.getDefaultInstance();
-
-            //#if MC >= 260100
-            //$$ drawContext.item(stack, itemIconX, itemY);
-            //$$ drawContext.itemDecorations(font, stack, itemIconX, itemY);
-            //#else
-            drawContext.renderItem(stack, itemIconX, itemY);
-            drawContext.renderItemDecorations(font, stack, itemIconX, itemY);
-            //#endif
-
-            String name = getItemName(entry);
-            int availableWidth = maxLineLength - 20;
-            if (font.width(name) > availableWidth) {
-                name = font.plainSubstrByWidth(name, availableWidth - font.width("...")) + "...";
-            }
-            drawContext.drawString(font, name, itemTextX, itemY + 4, TEXT_COLOR, true);
-
-            itemY += LINE_HEIGHT;
+        if (hasOverflow) {
+            Render2DUtils.drawStringScaled(
+                    overflow,
+                    drawX + Math.round(PADDING * scale),
+                    drawY + Math.round((rowY + 1) * scale),
+                    MUTED_TEXT_COLOR,
+                    true,
+                    scale
+            );
         }
-
-        if (showOverflow) {
-            String overflow = String.format(Language.getInstance().getOrDefault("litematica-printer.hud.missing.overflow"), missing.size() - MAX_DISPLAY_ITEMS);
-            drawContext.drawString(font, overflow,
-                    posX + 2, itemY + 4, TEXT_COLOR_GRAY, true);
-        }
-
-        return contentHeight + 4;
-        //#else
-        //$$ return renderOld(matrixStack, missing, totalTypes, displayCount, showOverflow,
-        //$$         maxLineLength, posX, posY, contentHeight, bgMargin);
-        //#endif
     }
 
-    private static String getItemName(MissingMaterialTracker.Entry entry)
-    {
-        return entry.displayName != null
-                ? entry.displayName.getString()
-                : entry.item.getDefaultInstance().getDisplayName().getString();
+    private static void drawItemScaled(ItemStack stack, int x, int y, float scale) {
+        if (Math.abs(scale - 1.0F) < 0.001F) {
+            Render2DUtils.drawItem(stack, x, y);
+            return;
+        }
+        Render2DUtils.pushPose();
+        Render2DUtils.translate(x, y);
+        Render2DUtils.scale(scale, scale);
+        Render2DUtils.drawItem(stack, 0, 0);
+        Render2DUtils.popPose();
     }
 
-    //#if MC < 12000
-    //$$ private static int renderOld(PoseStack matrixStack,
-    //$$                               List<MissingMaterialTracker.Entry> missing,
-    //$$                               int totalTypes, int displayCount, boolean showOverflow,
-    //$$                               int maxLineLength, int posX, int posY,
-    //$$                               int contentHeight, int bgMargin)
-    //$$ {
-    //$$     Minecraft mc = Minecraft.getInstance();
-    //$$     Font font = mc.font;
-    //$$
-    //$$     int x1 = posX - bgMargin;
-    //$$     int y1 = posY - bgMargin;
-    //$$     int x2 = x1 + maxLineLength + bgMargin * 2;
-    //$$     int y2 = y1 + contentHeight + bgMargin;
-    //$$
-    //$$     GuiComponent.fill(matrixStack, x1, y1, x2, y2, BG_COLOR);
-    //$$
-    //$$     String title = String.format(Language.getInstance().getOrDefault("litematica-printer.hud.missing.title"), totalTypes);
-    //$$     GuiComponent.drawString(matrixStack, font, title,
-    //$$             posX + 2, posY + 2, TEXT_COLOR);
-    //$$
-    //$$     int itemIconX = posX;
-    //$$     int itemTextX = posX + 18;
-    //$$     int itemY = posY + 16;
-    //$$     for (int i = 0; i < displayCount; i++) {
-    //$$         MissingMaterialTracker.Entry entry = missing.get(i);
-    //$$         ItemStack stack = entry.item.getDefaultInstance();
-    //$$
-    //$$         //#if MC >= 11900
-    //$$         mc.getItemRenderer().renderGuiItem(matrixStack, stack, itemIconX, itemY);
-    //$$         mc.getItemRenderer().renderGuiItemDecorations(matrixStack, font, stack, itemIconX, itemY);
-    //$$         //#else
-    //$$         //$$ mc.getItemRenderer().renderGuiItem(stack, itemIconX, itemY);
-    //$$         //$$ mc.getItemRenderer().renderGuiItemDecorations(font, stack, itemIconX, itemY);
-    //$$         //#endif
-    //$$
-    //$$         String name = getItemName(entry);
-    //$$         int availableWidth = maxLineLength - 20;
-    //$$         if (font.width(name) > availableWidth) {
-    //$$             name = font.plainSubstrByWidth(name, availableWidth - font.width("...")) + "...";
-    //$$         }
-    //$$         GuiComponent.drawString(matrixStack, font, name, itemTextX, itemY + 4, TEXT_COLOR);
-    //$$
-    //$$         itemY += LINE_HEIGHT;
-    //$$     }
-    //$$
-    //$$     if (showOverflow) {
-    //$$         String overflow = String.format(Language.getInstance().getOrDefault("litematica-printer.hud.missing.overflow"), missing.size() - MAX_DISPLAY_ITEMS);
-    //$$         GuiComponent.drawString(matrixStack, font, overflow,
-    //$$                 posX + 2, itemY + 4, TEXT_COLOR_GRAY);
-    //$$     }
-    //$$
-    //$$     return contentHeight + 4;
-    //$$ }
-    //#endif
+    private static int clampToScreen(int preferred, int size, int screenSize) {
+        return Math.max(0, Math.min(preferred, Math.max(0, screenSize - size)));
+    }
 }

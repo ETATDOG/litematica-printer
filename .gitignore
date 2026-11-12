@@ -60,6 +60,7 @@ fabric.properties
 **/build/
 **/run/
 **/libs/
+**/docs/
 
 # 跨平台系统临时文件
 # macOS
@@ -87,11 +88,8 @@ $RECYCLE.BIN/
 !.env.example
 
 *profile*
-
-# AI 辅助开发工具/配置
-.github/copilot-instructions.md
-.trae/
-AGENTS.md
-*.factorypath
-/.sisyphus/
-.omo/
+# IPN compatibility sources are not local profiling output.
+!src/main/java/me/aleksilassila/litematica/printer/mixin_plugin/InventoryProfilesNextMixinConfigPlugin.java
+!src/test/java/me/aleksilassila/litematica/printer/mixin_plugin/InventoryProfilesNextContractTest.java
+!src/test/java/me/aleksilassila/litematica/printer/mixin_plugin/InventoryProfilesNextKeeperContractTest.java
+.agents

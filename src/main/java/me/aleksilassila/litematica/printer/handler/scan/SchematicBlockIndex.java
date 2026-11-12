@@ -1,0 +1,269 @@
+package me.aleksilassila.litematica.printer.handler.scan;
+
+import fi.dy.masa.litematica.world.ChunkManagerSchematic;
+import fi.dy.masa.litematica.world.ChunkSchematic;
+import fi.dy.masa.litematica.world.ChunkSchematicState;
+import fi.dy.masa.litematica.world.WorldSchematic;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.chunk.LevelChunkSection;
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.function.LongConsumer;
+import me.aleksilassila.litematica.printer.printer.PrinterBox;
+import me.aleksilassila.litematica.printer.core.diagnostics.RuntimeTiming;
+import me.aleksilassila.litematica.printer.core.diagnostics.RuntimeTiming.Stage;
+import me.aleksilassila.litematica.printer.core.diagnostics.RuntimeTiming.Reason;
+
+/**
+ * Sparse index of non-air positions in one schematic world.
+ *
+ * <p>The PRINT scanner only needs schematic non-air positions. Keeping those positions in chunk
+ * buckets avoids walking the air volume of a large, sparse placement. The index is deliberately
+ * isolated from world intents: MINE, FILL and FLUID must continue to inspect live world state.</p>
+ */
+final class SchematicBlockIndex implements SchematicPositionQuery {
+    private static final int SECTION_SIZE = 16;
+
+    private final SectionPositionIndex nonAirPositions = new SectionPositionIndex();
+    private final SchematicSectionSnapshots sectionSnapshots = new SchematicSectionSnapshots();
+    private WorldSchematic indexedSchematic;
+    private List<ChunkStamp> indexedChunks = List.of();
+    private List<ChunkStamp> encounteredChunks = List.of();
+    private boolean encounteredAllFilled;
+    private State state = State.STALE;
+
+    enum State {
+        STALE,
+        WAITING,
+        BUILDING,
+        READY
+    }
+
+    boolean ensureBuilt(WorldSchematic schematic) {
+        return this.ensureBuilt(schematic, RuntimeTiming.disabled(), "print");
+    }
+
+    boolean ensureBuilt(WorldSchematic schematic, RuntimeTiming timing, String owner) {
+        return this.ensureBuilt(schematic, timing, owner, true);
+    }
+
+    boolean ensureBuilt(WorldSchematic schematic, RuntimeTiming timing, String owner, boolean buildSparseIndex) {
+        long checkStart = timing.start();
+        try {
+            if (schematic == null) {
+                boolean changed = this.state != State.STALE || this.indexedSchematic != null;
+                this.clear();
+                return changed;
+            }
+            return buildSparseIndex ? this.ensureBuiltWithStableChunkStates(schematic, timing, owner)
+                    : this.waitForDenseFallback(schematic);
+        } finally {
+            timing.finish(owner, Stage.INDEX_CHECK, checkStart);
+            if (this.state == State.WAITING) timing.count(owner, Reason.INDEX_WAITING, 1);
+        }
+    }
+
+    private boolean ensureBuiltWithStableChunkStates(WorldSchematic schematic, RuntimeTiming timing, String owner) {
+        List<ChunkSchematic> current = loadedChunks(schematic);
+        boolean mayMatch = this.indexedSchematic == schematic
+                && (this.state == State.READY || this.state == State.WAITING && !this.encounteredAllFilled);
+        LoadedChunks loadedChunks = captureLoadedChunks(current, mayMatch ? this.encounteredChunks : null);
+        if (loadedChunks == null) return false;
+        this.encounteredChunks = loadedChunks.encounterOrder();
+        this.encounteredAllFilled = loadedChunks.allFilled();
+        if (!loadedChunks.allFilled()) {
+            boolean changed = this.indexedSchematic != schematic
+                    || this.state != State.WAITING
+                    || !sameChunkSnapshot(this.indexedChunks, loadedChunks.stamps());
+            this.nonAirPositions.clear();
+            this.sectionSnapshots.clear();
+            this.indexedSchematic = schematic;
+            this.indexedChunks = loadedChunks.stamps();
+            this.state = State.WAITING;
+            return changed;
+        }
+        if (this.state == State.READY
+                && this.indexedSchematic == schematic
+                && sameChunkSnapshot(this.indexedChunks, loadedChunks.stamps())) {
+            return false;
+        }
+        if (this.state == State.BUILDING) {
+            return false;
+        }
+        long buildStart = timing.start();
+        timing.count(owner, Reason.INDEX_REBUILT, 1);
+        try {
+            this.build(schematic, loadedChunks);
+        } finally {
+            timing.finish(owner, Stage.INDEX_BUILD, buildStart);
+        }
+        return true;
+    }
+
+    private boolean waitForDenseFallback(WorldSchematic schematic) {
+        List<ChunkSchematic> current = loadedChunks(schematic);
+        boolean mayMatch = this.indexedSchematic == schematic && this.state == State.WAITING;
+        LoadedChunks loadedChunks = captureLoadedChunks(current, mayMatch ? this.encounteredChunks : null);
+        if (loadedChunks == null) return false;
+        this.encounteredChunks = loadedChunks.encounterOrder();
+        this.encounteredAllFilled = loadedChunks.allFilled();
+        boolean changed = this.indexedSchematic != schematic || this.state != State.WAITING
+                || !sameChunkSnapshot(this.indexedChunks, loadedChunks.stamps());
+        this.nonAirPositions.clear();
+        this.sectionSnapshots.clear();
+        this.indexedSchematic = schematic;
+        this.indexedChunks = loadedChunks.stamps();
+        this.state = State.WAITING;
+        return changed;
+    }
+
+    boolean isReady() {
+        return this.state == State.READY;
+    }
+
+    @Override
+    public long forEachInRange(List<PrinterBox> boxes, ScanRegion region, LongConsumer consumer) {
+        return this.nonAirPositions.forEachInRange(boxes, region, consumer);
+    }
+
+    SchematicPositionQuery unresolvedPrintQuery(SectionSnapshotStore snapshots) {
+        return (boxes, region, consumer) -> this.nonAirPositions.forEachInRange(
+                boxes, region, snapshots::excludedPrintPositions, consumer);
+    }
+
+    void clear() {
+        this.nonAirPositions.clear();
+        this.sectionSnapshots.clear();
+        this.indexedSchematic = null;
+        this.indexedChunks = List.of();
+        this.encounteredChunks = List.of();
+        this.encounteredAllFilled = false;
+        this.state = State.STALE;
+    }
+
+    private void build(WorldSchematic schematic, LoadedChunks loadedChunks) {
+        boolean reuse = this.state == State.READY && this.indexedSchematic == schematic;
+        this.state = State.BUILDING;
+        if (!reuse) {
+            this.nonAirPositions.clear();
+            this.sectionSnapshots.clear();
+        }
+        this.indexedSchematic = schematic;
+
+        int bottomY = schematic.getMinY();
+        LongOpenHashSet retainedSections = new LongOpenHashSet();
+        try (var comparison = this.sectionSnapshots.compare()) {
+            for (ChunkSchematic chunk : loadedChunks.chunks()) {
+                ChunkPos chunkPos = chunk.getPos();
+                int chunkX = chunkPos.x();
+                int chunkZ = chunkPos.z();
+                LevelChunkSection[] sections = chunk.getSections();
+                for (int sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
+                    LevelChunkSection section = sections[sectionIndex];
+                    if (section == null || section.hasOnlyAir()) {
+                        continue;
+                    }
+                    int sectionBaseY = bottomY + (sectionIndex << 4);
+                    long sectionKey = ScanGeometry.sectionKey(chunkX, sectionBaseY >> 4, chunkZ);
+                    retainedSections.add(sectionKey);
+                    if (comparison.unchanged(sectionKey, section)) continue;
+                    this.nonAirPositions.removeSection(sectionKey);
+                    for (int y = 0; y < SECTION_SIZE; y++) {
+                        for (int z = 0; z < SECTION_SIZE; z++) {
+                            for (int x = 0; x < SECTION_SIZE; x++) {
+                                if (!section.getBlockState(x, y, z).isAir()) {
+                                    this.nonAirPositions.add(BlockPos.asLong(
+                                            (chunkX << 4) + x,
+                                            sectionBaseY + y,
+                                            (chunkZ << 4) + z
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        this.nonAirPositions.retainSections(retainedSections);
+        this.sectionSnapshots.retainSections(retainedSections);
+        this.indexedChunks = loadedChunks.stamps();
+        this.state = State.READY;
+    }
+
+    private static List<ChunkSchematic> loadedChunks(WorldSchematic schematic) {
+        ChunkManagerSchematic chunkManager = (ChunkManagerSchematic) schematic.getChunkSource();
+        return chunkManager.getLoadedValueSet();
+    }
+
+    /** Null means every entry matched. Encounter order is only a fast path, never an invariant. */
+    private static LoadedChunks captureLoadedChunks(List<ChunkSchematic> current, List<ChunkStamp> previous) {
+        boolean matching = previous != null && previous.size() == current.size();
+        List<ChunkSchematic> chunks = matching ? null : new ArrayList<>(current.size());
+        List<ChunkStamp> stamps = matching ? null : new ArrayList<>(current.size());
+        boolean allFilled = true;
+        for (int i = 0; i < current.size(); i++) {
+            ChunkSchematic chunk = current.get(i);
+            long key = 0L;
+            boolean filled = false;
+            if (chunk != null) {
+                ChunkPos chunkPos = chunk.getPos();
+                key = chunkKey(chunkPos.x(), chunkPos.z());
+                filled = chunk.getState().atLeast(ChunkSchematicState.FILLED);
+                allFilled &= filled;
+            }
+            if (matching) {
+                ChunkStamp stamp = previous.get(i);
+                if (chunk != null && stamp.identity() == chunk && stamp.key() == key
+                        && stamp.filled() == filled) continue;
+                // Reuse the already-validated prefix instead of reading its live state twice.
+                // A LOADED observation must not turn into FILLED within this check.
+                matching = false;
+                chunks = new ArrayList<>(current.size());
+                stamps = new ArrayList<>(current.size());
+                for (int prefix = 0; prefix < i; prefix++) {
+                    ChunkStamp observed = previous.get(prefix);
+                    chunks.add((ChunkSchematic) observed.identity());
+                    stamps.add(observed);
+                }
+            }
+            if (chunk == null) continue;
+            chunks.add(chunk);
+            stamps.add(new ChunkStamp(key, chunk, filled));
+        }
+        if (matching) return null;
+        List<ChunkStamp> encounterOrder = List.copyOf(stamps);
+        stamps.sort(Comparator.comparingLong(ChunkStamp::key));
+        return new LoadedChunks(List.copyOf(chunks), List.copyOf(stamps), encounterOrder, allFilled);
+    }
+
+    static boolean sameChunkSnapshot(List<ChunkStamp> first, List<ChunkStamp> second) {
+        if (first.size() != second.size()) {
+            return false;
+        }
+        for (int index = 0; index < first.size(); index++) {
+            ChunkStamp left = first.get(index);
+            ChunkStamp right = second.get(index);
+            if (left.key() != right.key()
+                    || left.identity() != right.identity()
+                    || left.filled() != right.filled()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static long chunkKey(int chunkX, int chunkZ) {
+        return (long) chunkX << 32 | chunkZ & 0xFFFFFFFFL;
+    }
+
+    static record ChunkStamp(long key, Object identity, boolean filled) {
+    }
+
+    private record LoadedChunks(List<ChunkSchematic> chunks, List<ChunkStamp> stamps,
+                                List<ChunkStamp> encounterOrder, boolean allFilled) {
+    }
+}

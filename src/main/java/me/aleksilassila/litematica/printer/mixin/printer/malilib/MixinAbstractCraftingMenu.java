@@ -34,9 +34,10 @@ public abstract class MixinAbstractCraftingMenu<TYPE, WIDGET extends WidgetListE
                     cir.setReturnValue(true);
                     return;
                 }
-                for (String s2 : PinYinSearchUtils.getPinYin(fullName).stream().distinct().toList()) {
+                for (String s2 : PinYinSearchUtils.getPinYin(fullName)) {
                     if (s2.contains(filterText)) {
                         cir.setReturnValue(true);
+                        return;
                     }
                 }
             }

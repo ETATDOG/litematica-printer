@@ -1,0 +1,399 @@
+//#if MC == 260100
+package me.aleksilassila.litematica.printer.integration.quickshulker;
+
+import fi.dy.masa.litematica.data.DataManager;
+import fi.dy.masa.litematica.selection.AreaSelectionSimple;
+import fi.dy.masa.litematica.selection.Box;
+import fi.dy.masa.litematica.selection.SelectionManager;
+import fi.dy.masa.litematica.selection.SelectionMode;
+import fi.dy.masa.malilib.config.IConfigOptionListEntry;
+import fi.dy.masa.malilib.config.options.ConfigOptionList;
+import fi.dy.masa.malilib.config.options.ConfigStringList;
+import me.aleksilassila.litematica.printer.config.Configs;
+import me.aleksilassila.litematica.printer.enums.PrintModeType;
+import me.aleksilassila.litematica.printer.enums.SelectionType;
+import me.aleksilassila.litematica.printer.enums.WorkingModeType;
+import me.aleksilassila.litematica.printer.handler.FeatureModuleBase;
+import me.aleksilassila.litematica.printer.handler.HudStatsManager;
+import me.aleksilassila.litematica.printer.handler.handlers.MineHandler;
+import me.aleksilassila.litematica.printer.integration.inventory.*;
+import me.aleksilassila.litematica.printer.integration.litematica.LitematicaAdapter;
+import me.aleksilassila.litematica.printer.printer.MissingMaterialTracker;
+import me.aleksilassila.litematica.printer.printer.PrinterBox;
+import me.aleksilassila.litematica.printer.printer.action.ActionPort;
+import me.aleksilassila.litematica.printer.runtime.PrinterRuntime;
+import me.aleksilassila.litematica.printer.runtime.RuntimeAccess;
+import me.aleksilassila.litematica.printer.utils.InventorySwitchGuard;
+import me.aleksilassila.litematica.printer.utils.minecraft.PlayerUtils;
+import net.minecraft.client.Minecraft;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityEquipment;
+import net.minecraft.world.entity.player.Abilities;
+import net.minecraft.world.entity.player.Inventory;
+import net.minecraft.world.item.*;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.Vec3;
+import org.junit.jupiter.api.*;
+
+import java.lang.reflect.Proxy;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
+
+import static me.aleksilassila.litematica.printer.integration.quickshulker.CancelledSwapLifecycleTest.*;
+import static me.aleksilassila.litematica.printer.integration.quickshulker.QuickShulkerPacketContractTest.allocate;
+import static org.junit.jupiter.api.Assertions.*;
+
+/** Real trench execution and material selection, with only the world/network boundary replaced. */
+class TrenchFillIntegrationTest {
+    static final BlockPos TARGET = new BlockPos(0, 1, 0);
+    @BeforeAll static void bootstrap() { InventoryRegressionTest.bootstrap(); }
+
+    static class TrenchPlayer extends Player {
+        Abilities abilities;
+        @Override public Abilities getAbilities() { return abilities; }
+        @Override public ItemStack getMainHandItem() { return inventory.getItem(0); }
+        @Override public double blockInteractionRange() { return 4.5; }
+    }
+
+    static class TrenchLevel extends QuickShulkerPacketContractTest.AuditLevel {
+        long tick;
+        BlockState targetState;
+        Map<BlockPos, BlockState> states;
+        @Override public long getGameTime() { return tick; }
+        @Override public int getMinY() { return -64; }
+        @Override public int getHeight() { return 384; }
+        @Override public BlockState getBlockState(BlockPos pos) {
+            if (states != null && states.containsKey(pos)) return states.get(pos);
+            return pos.equals(TARGET) ? targetState
+                    : pos.equals(TARGET.below()) ? Blocks.SOUL_SAND.defaultBlockState() : Blocks.AIR.defaultBlockState();
+        }
+    }
+
+    static class TrenchHandler extends MineHandler {
+        TrenchHandler() { super(null); }
+        @Override protected boolean canReachIterationPosition(BlockPos pos) { return true; }
+    }
+
+    static class Fixture implements AutoCloseable {
+        final ConfigStringList config = Configs.Mine.MINE_TRENCH_FILL_BLOCK_LIST;
+        final List<String> oldFilters = List.copyOf(config.getStrings());
+        final boolean oldWorkSwitch = Configs.Core.WORK_SWITCH.getBooleanValue();
+        final boolean oldTrench = Configs.Mine.MINE_TRENCH_MODE.getBooleanValue();
+        final IConfigOptionListEntry oldWorkMode = Configs.Core.WORK_MODE.getOptionListValue();
+        final IConfigOptionListEntry oldWorkModeType = Configs.Core.WORK_MODE_TYPE.getOptionListValue();
+        final IConfigOptionListEntry oldSelectionType = Configs.Mine.MINE_SELECTION_TYPE.getOptionListValue();
+        final Object oldClient = get(null, Minecraft.class, "instance");
+        final Object oldRuntime = get(null, RuntimeAccess.class, "current");
+        final sun.misc.Unsafe unsafe;
+        final java.lang.reflect.Field playerUtilsClient;
+        final Object oldPlayerUtilsClient;
+        final Minecraft client = allocate(Minecraft.class);
+        final TrenchPlayer player = allocate(TrenchPlayer.class);
+        final TrenchLevel level = allocate(TrenchLevel.class);
+        final MineHandler handler = allocate(TrenchHandler.class);
+        final Object state;
+        final InventorySwitchGuard switchGuard;
+        final List<MaterialRequest> requests = new ArrayList<>();
+        final List<Item[]> queued = new ArrayList<>();
+        final ActionPort actions;
+        final DataManager data;
+        final SelectionManager selections;
+        final Object oldArea;
+        final SelectionMode oldSelectionMode;
+        Box selectionBox;
+        BooleanSupplier queueValidity;
+        Consumer<ActionPort.SendResult> completionListener;
+        boolean queuePresent;
+        int queueCalls;
+        ActionPort.SendResult result = ActionPort.SendResult.SENT;
+
+        Fixture() throws Exception {
+            config.setStrings(List.of("minecraft:cobblestone"));
+            Configs.Core.WORK_SWITCH.setBooleanValue(true);
+            Configs.Core.WORK_MODE.setOptionListValue(WorkingModeType.SINGLE);
+            Configs.Core.WORK_MODE_TYPE.setOptionListValue(PrintModeType.MINE);
+            Configs.Mine.MINE_TRENCH_MODE.setBooleanValue(true);
+            Configs.Mine.MINE_SELECTION_TYPE.setOptionListValue(SelectionType.LITEMATICA_SELECTION);
+            player.inventory = new Inventory(player, new EntityEquipment());
+            player.abilities = new Abilities();
+            set(player, Entity.class, "position", Vec3.ZERO);
+            level.tick = 100;
+            level.targetState = Blocks.LAVA.defaultBlockState();
+            client.player = player;
+            client.level = level;
+            set(null, Minecraft.class, "instance", client);
+            var unsafeField = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+            unsafeField.setAccessible(true);
+            unsafe = (sun.misc.Unsafe) unsafeField.get(null);
+            playerUtilsClient = PlayerUtils.class.getDeclaredField("client");
+            playerUtilsClient.setAccessible(true);
+            oldPlayerUtilsClient = playerUtilsClient.get(null);
+            setPlayerUtilsClient(client);
+            switchGuard = new InventorySwitchGuard(client, () -> level.tick);
+            var runtime = allocate(PrinterRuntime.class);
+            set(runtime, PrinterRuntime.class, "inventorySwitchGuard", switchGuard);
+            set(runtime, PrinterRuntime.class, "materialRequests", new MaterialRequestCoordinator(List.of(new InventoryProvider() {
+                @Override public String id() { return "trench-test"; }
+                @Override public MaterialReservation request(MaterialRequest request) {
+                    requests.add(request);
+                    return new MaterialReservation(request.token(), MaterialReservation.State.PENDING);
+                }
+            })));
+            RuntimeAccess.install(runtime);
+            var constructor = Class.forName("me.aleksilassila.litematica.printer.handler.handlers.TrenchFillState").getDeclaredConstructor();
+            constructor.setAccessible(true);
+            state = constructor.newInstance();
+            set(handler, MineHandler.class, "trenchFill", state);
+            addTarget(level.tick);
+            set(handler, FeatureModuleBase.class, "mc", client);
+            set(handler, FeatureModuleBase.class, "level", level);
+            set(handler, FeatureModuleBase.class, "player", player);
+            set(handler, FeatureModuleBase.class, "litematica", new LitematicaAdapter());
+            set(handler, FeatureModuleBase.class, "playerInteractionBox",
+                    new AtomicReference<>(new PrinterBox(-8, -8, -8, 8, 8, 8)));
+            var dataInstance = DataManager.class.getDeclaredMethod("getInstance");
+            dataInstance.setAccessible(true);
+            data = (DataManager) dataInstance.invoke(null);
+            selections = DataManager.getSelectionManager();
+            oldArea = get(data, DataManager.class, "areaSimple");
+            oldSelectionMode = selections.getSelectionMode();
+            select(TARGET, TARGET);
+            var scopeType = Class.forName("me.aleksilassila.litematica.printer.handler.ModuleSelectionScope");
+            var scopeConstructor = scopeType.getDeclaredConstructor(FeatureModuleBase.class, ConfigOptionList.class);
+            scopeConstructor.setAccessible(true);
+            set(handler, FeatureModuleBase.class, "selectionScope",
+                    scopeConstructor.newInstance(handler, Configs.Mine.MINE_SELECTION_TYPE));
+            set(handler, FeatureModuleBase.class, "hudStats", new HudStatsManager(client, () -> level.tick));
+            set(handler, FeatureModuleBase.class, "missingMaterials", new MissingMaterialTracker());
+            actions = (ActionPort) Proxy.newProxyInstance(ActionPort.class.getClassLoader(), new Class<?>[]{ActionPort.class}, (p,m,a) -> {
+                if (m.getName().equals("queueClick")) {
+                    queueCalls++;
+                    if (queuePresent) return false;
+                    assertEquals(TARGET.below(), a[0]);
+                    assertEquals(Direction.UP, a[1]);
+                    queued.add(((Item[]) a[5]).clone());
+                    queuePresent = true;
+                    return true;
+                }
+                if (m.getName().equals("setQueueCompletionListener")) {
+                    if (!queuePresent) return false;
+                    @SuppressWarnings("unchecked")
+                    var listener = (Consumer<ActionPort.SendResult>) a[0];
+                    completionListener = listener;
+                    return true;
+                }
+                if (m.getName().equals("setQueueValidity")) {
+                    if (!queuePresent) return false;
+                    queueValidity = (BooleanSupplier) a[0];
+                    return true;
+                }
+                if (m.getName().equals("sendQueue")) {
+                    if (!queuePresent) return ActionPort.SendResult.NO_QUEUED_ACTION;
+                    if (queueValidity != null && !queueValidity.getAsBoolean()) {
+                        finishQueue(ActionPort.SendResult.NO_QUEUED_ACTION);
+                        return ActionPort.SendResult.NO_QUEUED_ACTION;
+                    }
+                    if (!result.isWaiting()) finishQueue(result);
+                    return result;
+                }
+                if (m.getName().equals("cancelQueue")) {
+                    finishQueue(ActionPort.SendResult.NO_QUEUED_ACTION);
+                    return null;
+                }
+                return m.getReturnType() == boolean.class ? false : null;
+            });
+            set(handler, FeatureModuleBase.class, "actionBroker", actions);
+        }
+
+        boolean execute() throws Exception {
+            return execute(TARGET, new AtomicReference<>(false));
+        }
+
+        void select(BlockPos first, BlockPos second) throws Exception {
+            var area = new AreaSelectionSimple(true);
+            selectionBox = area.getAllSubRegionBoxes().get(0);
+            selectionBox.setPos1(first);
+            selectionBox.setPos2(second);
+            set(data, DataManager.class, "areaSimple", area);
+            set(selections, SelectionManager.class, "mode", SelectionMode.SIMPLE);
+        }
+
+        void bounds(BlockPos first, BlockPos second) {
+            selectionBox.setPos1(first);
+            selectionBox.setPos2(second);
+        }
+
+        boolean execute(BlockPos pos, AtomicReference<Boolean> skip) throws Exception {
+            var method = MineHandler.class.getDeclaredMethod("executeTrenchFill", BlockPos.class, AtomicReference.class);
+            method.setAccessible(true);
+            method.invoke(handler, pos, skip);
+            return skip.get();
+        }
+
+        boolean canAttempt(long tick) throws Exception {
+            var method = state.getClass().getDeclaredMethod("canAttempt", BlockPos.class, long.class);
+            method.setAccessible(true);
+            return (boolean) method.invoke(state, TARGET, tick);
+        }
+
+        ActionPort.SendResult completeWaiting(ActionPort.SendResult completion) {
+            assertTrue(queuePresent, "The turn-delayed action must still own its queue");
+            result = completion;
+            return actions.sendQueue(player);
+        }
+
+        private void finishQueue(ActionPort.SendResult completion) {
+            var listener = completionListener;
+            completionListener = null;
+            queueValidity = null;
+            queuePresent = false;
+            if (listener != null) listener.accept(completion);
+        }
+
+        void addTarget(long tick) throws Exception {
+            var update = state.getClass().getDeclaredMethod("updateTargets", List.class, Set.class,
+                    Set.class, long.class, Predicate.class);
+            update.setAccessible(true);
+            update.invoke(state, List.of(), Set.of(TARGET), Set.of(), tick, (Predicate<BlockPos>) pos -> true);
+        }
+
+        void clearTargets() throws Exception {
+            var clear = state.getClass().getDeclaredMethod("clear");
+            clear.setAccessible(true);
+            clear.invoke(state);
+        }
+
+        void blockUpdated(boolean stillFluid) throws Exception {
+            var update = state.getClass().getDeclaredMethod("onBlockUpdated", BlockPos.class, boolean.class);
+            update.setAccessible(true);
+            update.invoke(state, TARGET, stillFluid);
+        }
+
+        void beginTick(long tick) throws Exception {
+            var begin = state.getClass().getDeclaredMethod("beginTick", long.class);
+            begin.setAccessible(true);
+            begin.invoke(state, tick);
+        }
+
+        int sentThisTick() throws Exception {
+            var count = state.getClass().getDeclaredMethod("sentThisTick");
+            count.setAccessible(true);
+            return (int) count.invoke(state);
+        }
+
+        long lastSentTick() throws Exception {
+            var lastSent = state.getClass().getDeclaredMethod("lastSentTick");
+            lastSent.setAccessible(true);
+            return (long) lastSent.invoke(state);
+        }
+
+        boolean canSend(long tick, int interval, int limit) throws Exception {
+            var send = state.getClass().getDeclaredMethod("canSend", long.class, int.class, int.class);
+            send.setAccessible(true);
+            return (boolean) send.invoke(state, tick, interval, limit);
+        }
+
+        TrenchLevel changeWorld(long tick) throws Exception {
+            var next = allocate(TrenchLevel.class);
+            next.tick = tick;
+            next.targetState = Blocks.LAVA.defaultBlockState();
+            client.level = next;
+            set(handler, FeatureModuleBase.class, "level", next);
+            return next;
+        }
+
+        @SuppressWarnings("removal")
+        void setPlayerUtilsClient(Object value) {
+            unsafe.putObject(unsafe.staticFieldBase(playerUtilsClient), unsafe.staticFieldOffset(playerUtilsClient), value);
+        }
+
+        @Override public void close() throws Exception {
+            config.setStrings(oldFilters);
+            Configs.Core.WORK_SWITCH.setBooleanValue(oldWorkSwitch);
+            Configs.Core.WORK_MODE.setOptionListValue(oldWorkMode);
+            Configs.Core.WORK_MODE_TYPE.setOptionListValue(oldWorkModeType);
+            Configs.Mine.MINE_TRENCH_MODE.setBooleanValue(oldTrench);
+            Configs.Mine.MINE_SELECTION_TYPE.setOptionListValue(oldSelectionType);
+            set(data, DataManager.class, "areaSimple", oldArea);
+            set(selections, SelectionManager.class, "mode", oldSelectionMode);
+            setPlayerUtilsClient(oldPlayerUtilsClient);
+            set(null, Minecraft.class, "instance", oldClient);
+            set(null, RuntimeAccess.class, "current", oldRuntime);
+        }
+    }
+
+    @Test void cobblestoneQueuesAgainstSoulSandAndWaitsForTheWorld() throws Exception {
+        try (var f = new Fixture()) {
+            f.player.inventory.setItem(0, new ItemStack(Items.COBBLESTONE, 64));
+            f.player.inventory.setItem(1, new ItemStack(Items.SAND, 64));
+            assertFalse(f.execute());
+            assertEquals(1, f.queued.size());
+            assertArrayEquals(new Item[]{Items.COBBLESTONE}, f.queued.getFirst());
+            assertEquals(1, f.sentThisTick());
+            assertFalse(f.canAttempt(130L));
+            assertEquals(Blocks.LAVA.defaultBlockState(), f.level.targetState, "No speculative world write");
+            assertEquals(64, f.player.getMainHandItem().getCount(), "No direct inventory mutation");
+            // Changing the list must not release an already queued placement's confirmation.
+            f.config.setStrings(List.of("minecraft:stone"));
+            var refresh = MineHandler.class.getDeclaredMethod("refreshTrenchFillMaterials");
+            refresh.setAccessible(true);
+            refresh.invoke(f.handler);
+            assertFalse(f.canAttempt(130L));
+            assertArrayEquals(new Item[]{Items.COBBLESTONE}, f.queued.getFirst());
+        }
+    }
+
+    @Test void missingCobblestoneRequestsOnlyCobblestoneEvenWhenSandIsHeld() throws Exception {
+        try (var f = new Fixture()) {
+            f.player.inventory.setItem(0, new ItemStack(Items.SAND, 64));
+            assertTrue(f.execute());
+            assertTrue(f.queued.isEmpty());
+            assertEquals(1, f.requests.size());
+            assertEquals(List.of(Items.COBBLESTONE), f.requests.getFirst().acceptedItems());
+            assertFalse(f.canAttempt(119L));
+            assertTrue(f.canAttempt(120L));
+        }
+    }
+
+    @Test void emptyOrInvalidListsNeverRequestOrPlaceSand() throws Exception {
+        try (var f = new Fixture()) {
+            f.player.inventory.setItem(0, new ItemStack(Items.SAND, 64));
+            for (var filters : List.of(List.<String>of(), List.of("minecraft:stick"))) {
+                f.config.setStrings(filters);
+                assertTrue(f.execute());
+                assertTrue(f.queued.isEmpty());
+                assertTrue(f.requests.isEmpty());
+                f.level.tick += 20;
+            }
+        }
+    }
+
+    @Test void pendingInventorySwitchDoesNotQueueAPlacement() throws Exception {
+        try (var f = new Fixture()) {
+            f.player.inventory.setItem(0, new ItemStack(Items.COBBLESTONE, 64));
+            f.switchGuard.markSwitchIfNeeded(Items.COBBLESTONE);
+            assertTrue(f.execute());
+            assertTrue(f.queued.isEmpty());
+            assertTrue(f.requests.isEmpty());
+            assertEquals(0, f.sentThisTick());
+        }
+    }
+
+    @Test void waitingForLookDoesNotCountAsSent() throws Exception {
+        try (var f = new Fixture()) {
+            f.player.inventory.setItem(0, new ItemStack(Items.COBBLESTONE, 64));
+            f.result = ActionPort.SendResult.WAITING_FOR_LOOK;
+            assertTrue(f.execute());
+            assertEquals(1, f.queued.size());
+            assertFalse(f.canAttempt(101L));
+            assertEquals(0, f.sentThisTick());
+        }
+    }
+}
+//#endif

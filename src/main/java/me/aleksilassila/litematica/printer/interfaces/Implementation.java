@@ -10,11 +10,16 @@ public class Implementation {
     public static Class<?>[] interactiveBlocks = {
             AbstractFurnaceBlock.class,     // 熔炉/烟熏炉/高炉
             CraftingTableBlock.class,       // 工作台
+            ChestBlock.class,               // 箱子
             LeverBlock.class,               // 拉杆
             DoorBlock.class,                // 门
             TrapDoorBlock.class,            // 活板门
             BedBlock.class,                 // 床
+            //#if MC >= 260300
+            //$$ RedstoneWireBlock.class,   // 红石线
+            //#else
             RedStoneWireBlock.class,        // 红石线
+            //#endif
             ScaffoldingBlock.class,         // 脚手架
             HopperBlock.class,              // 漏斗
             EnchantingTableBlock.class,     // 附魔台
@@ -41,15 +46,10 @@ public class Implementation {
             CartographyTableBlock.class,    // 制图台
             GrindstoneBlock.class,          // 砂轮
             StonecutterBlock.class,         // 切石机
-            ChestBlock.class,               // 箱子
-            //#if MC < 12109
-            //$$ FletchingTableBlock.class, // 制箭台
-            //#endif
             SmokerBlock.class,              // 烟熏炉
             BlastFurnaceBlock.class,        // 高炉
-            //#if MC >= 12003
-            CrafterBlock.class              // 合成器（自动合成台）
-            //#endif
+            CrafterBlock.class,             // 合成器（自动合成台）
+            SignBlock.class,                // 告示牌（右键打开编辑界面）
     };
 
     /**
@@ -59,6 +59,9 @@ public class Implementation {
      * @return 是否可以交互
      */
     public static boolean isInteractive(Block block) {
+        if (block == Blocks.VAULT) {
+            return true;
+        }
         for (Class<?> clazz : interactiveBlocks) {
             if (clazz.isInstance(block)) {
                 return true;

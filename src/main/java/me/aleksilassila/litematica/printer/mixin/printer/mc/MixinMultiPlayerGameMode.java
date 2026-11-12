@@ -1,11 +1,12 @@
 package me.aleksilassila.litematica.printer.mixin.printer.mc;
 
-import me.aleksilassila.litematica.printer.mixin.extension.BlockBreakResult;
-import me.aleksilassila.litematica.printer.config.Configs;
-import me.aleksilassila.litematica.printer.mixin.extension.MultiPlayerGameModeExtension;
-import me.aleksilassila.litematica.printer.utils.*;
+import me.aleksilassila.litematica.printer.interaction.MiningInteractionController;
+import me.aleksilassila.litematica.printer.interaction.MiningInteractionPort;
+import me.aleksilassila.litematica.printer.mixin_extension.BlockBreakResult;
+import me.aleksilassila.litematica.printer.mixin_extension.MultiPlayerGameModeExtension;
+import me.aleksilassila.litematica.printer.utils.minecraft.NetworkUtils;
+import me.aleksilassila.litematica.printer.runtime.RuntimeAccess;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.multiplayer.MultiPlayerGameMode;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
@@ -15,7 +16,6 @@ import net.minecraft.network.protocol.game.ServerboundUseItemOnPacket;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.BlockHitResult;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
@@ -25,229 +25,93 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-@SuppressWarnings("DataFlowIssue")
+/** Thin Minecraft field bridge. Mining policy and state transitions live outside the Mixin. */
+// Priority rationale: the port must observe Tweakeroo/Litematica's final interaction decision;
+// it delegates policy and only replaces behavior while an explicit printer mining session runs.
 @Mixin(value = MultiPlayerGameMode.class, priority = 1020)
-public abstract class MixinMultiPlayerGameMode implements MultiPlayerGameModeExtension {
-    // @formatter:off
+public abstract class MixinMultiPlayerGameMode implements MultiPlayerGameModeExtension, MiningInteractionPort {
     @Shadow private BlockPos destroyBlockPos;
     @Shadow private ItemStack destroyingItem;
     @Shadow private float destroyProgress;
     @Shadow private boolean isDestroying;
     @Shadow @Final private Minecraft minecraft;
-    @Shadow public abstract boolean destroyBlock(final BlockPos pos);
-    @Shadow protected abstract boolean sameDestroyTarget(final BlockPos pos);
+    @Unique private MiningInteractionController litematica_printer$mining;
+
+    @Shadow public abstract boolean destroyBlock(BlockPos pos);
+    @Shadow protected abstract boolean sameDestroyTarget(BlockPos pos);
     @Shadow protected abstract void ensureHasSentCarriedItem();
-    //#if MC > 11802
-    @Shadow public abstract InteractionResult useItemOn(LocalPlayer player, InteractionHand hand, BlockHitResult blockHitResult);
-    //#else
-    //$$ @Shadow public abstract InteractionResult useItemOn(LocalPlayer player,ClientLevel level, InteractionHand hand, BlockHitResult blockHitResult);
-    //#endif
-    // @formatter:on
+    @Shadow public abstract InteractionResult useItemOn(LocalPlayer player, InteractionHand hand, BlockHitResult hit);
 
-    @Inject(method = "stopDestroyBlock", at = @At("HEAD"), cancellable = true)
-    private void litematica_printer$keepPrinterMining(CallbackInfo ci) {
-        // 防止玩家手贱点了一下方块停止挖掘，导致重置进度
-        if (this.isDestroying && ConfigUtils.isPrinterEnable()
-                && BreakUtils.INSTANCE.isBreaking(this.destroyBlockPos)) {
-            ci.cancel();
+    @Unique
+    private MiningInteractionController litematica_printer$controller() {
+        if (this.litematica_printer$mining == null) {
+            this.litematica_printer$mining = new MiningInteractionController(
+                    this,
+                    RuntimeAccess.get().toolSwitchService()
+            );
         }
+        return this.litematica_printer$mining;
+    }
+
+    @Inject(method = "handleContainerInput", at = @At("HEAD"), cancellable = true)
+    private void printer$guardContainerSyncInput(CallbackInfo ci) {
+        if (RuntimeAccess.get().containerSync().guardManualInput()
+                || RuntimeAccess.get().chestTrackerAdapter().guardManualInput()) ci.cancel();
+    }
+
+    @Inject(method = "tick", at = @At("HEAD"))
+    private void litematica_printer$tickMiningController(CallbackInfo ci) {
+        this.litematica_printer$controller().tick();
+    }
+
+    @Override public void litematica_printer$resetRuntime() { this.litematica_printer$controller().reset(); }
+    @Override public boolean litematica_printer$isPendingDelayedDestroy(BlockPos pos) {
+        return this.litematica_printer$controller().isPendingDelayedDestroy(pos);
+    }
+    @Override public void litematica_printer$confirmServerBlockUpdate(BlockPos pos) {
+        this.litematica_printer$controller().confirmServerBlockUpdate(pos);
+    }
+    @Override public BlockBreakResult litematica_printer$continueDestroyBlockForMine(
+            BlockPos pos, Direction direction, boolean allowToolSwitch) {
+        return this.litematica_printer$controller().continueForMine(pos, direction, allowToolSwitch);
+    }
+    @Override public BlockBreakResult litematica_printer$continueDestroyBlock(
+            boolean localPrediction, BlockPos pos, Direction direction,
+            boolean forceDelayedDestroy, boolean allowToolSwitch) {
+        return this.litematica_printer$controller().continueDestroy(
+                localPrediction, pos, direction, forceDelayedDestroy, allowToolSwitch);
     }
 
     @Override
-    public BlockPos litematica_printer$destroyBlockPos() {
-        return destroyBlockPos;
-    }
-
-    @Override
-    public boolean litematica_printer$isDestroying() {
-        return isDestroying;
-    }
-
-    @Override
-    public void litematica_printer$startPrediction(PredictiveAction predictiveAction) {
-        PacketUtils.sendPacket(predictiveAction);
-    }
-
-    @Override
-    public InteractionResult litematica_printer$useItemOn(boolean localPrediction, InteractionHand hand, BlockHitResult blockHit) {
+    public InteractionResult litematica_printer$useItemOn(
+            boolean localPrediction, InteractionHand hand, BlockHitResult hit) {
         if (localPrediction) {
-            //#if MC > 11802
-            return useItemOn(minecraft.player, hand, blockHit);
-            //#else
-            //$$ return useItemOn(minecraft.player, minecraft.level, hand, blockHit);
-            //#endif
+            return this.useItemOn(this.minecraft.player, hand, hit);
         }
         this.ensureHasSentCarriedItem();
-        if (!this.minecraft.level.getWorldBorder().isWithinBounds(blockHit.getBlockPos())) {
-            return InteractionResult.FAIL;
-        }
-        //#if MC > 11802
-        litematica_printer$startPrediction((sequence) -> new ServerboundUseItemOnPacket(hand, blockHit, sequence));
-        //#else
-        //$$ litematica_printer$startPrediction((sequence) -> new ServerboundUseItemOnPacket(hand, blockHit));
-        //#endif
+        if (!this.minecraft.level.getWorldBorder().isWithinBounds(hit.getBlockPos())) return InteractionResult.FAIL;
+        NetworkUtils.sendPacket(sequence -> new ServerboundUseItemOnPacket(hand, hit, sequence));
         return InteractionResult.PASS;
     }
 
-    @Unique
-    private float litematica_printer$GetBreakingProgressMax() {
-        int value = Configs.Break.BREAK_PROGRESS_THRESHOLD.getIntegerValue();
-        if (value < 70) {
-            value = 70;
-        } else if (value > 100) {
-            value = 100;
-        }
-        return (float) value / 100;
+    @Override public Minecraft client() { return this.minecraft; }
+    @Override public BlockPos destroyPos() { return this.destroyBlockPos; }
+    @Override public void destroyPos(BlockPos pos) { this.destroyBlockPos = pos; }
+    @Override public ItemStack destroyingItem() { return this.destroyingItem; }
+    @Override public void destroyingItem(ItemStack stack) { this.destroyingItem = stack; }
+    @Override public float destroyProgress() { return this.destroyProgress; }
+    @Override public void destroyProgress(float progress) { this.destroyProgress = progress; }
+    @Override public boolean isDestroying() { return this.isDestroying; }
+    @Override public void isDestroying(boolean destroying) { this.isDestroying = destroying; }
+    @Override public boolean matchesDestroyTarget(BlockPos pos) { return this.sameDestroyTarget(pos); }
+    @Override public boolean isInventorySwitchPending() {
+        return RuntimeAccess.get().inventorySwitchGuard().isWaiting();
     }
-
-    @Unique
-    private int litematica_printer$GetDestroyStage() {
-        float breakingProgress = destroyProgress >= litematica_printer$GetBreakingProgressMax() ? 1.0F : destroyProgress;
-        return breakingProgress > 0.0F ? (int) (breakingProgress * 10.0F) : -1;
-    }
-
-    @Unique
-    private ServerboundPlayerActionPacket litematica_printer$GetServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action action, BlockPos blockPos, Direction direction, int sequence) {
-        //#if MC > 11802
-        return new ServerboundPlayerActionPacket(action, blockPos, direction, sequence);
-        //#else
-        //$$ return new ServerboundPlayerActionPacket(action, blockPos, direction);
-        //#endif
-    }
-
-    /**
-     * 开始挖掘方块的核心方法
-     * 处理权限检查、创造模式特殊逻辑、生存模式挖掘进度初始化
-     * 
-     * @param blockPos 目标方块位置
-     * @param direction 挖掘方向
-     * @param player 玩家实例
-     * @param level 客户端世界
-     * @param gameMode 游戏模式管理器
-     * @param localPrediction 是否使用本地预测
-     * @return 挖掘结果状态
-     */
-    @Unique
-    private BlockBreakResult litematica_printer$startDestroyBlock(BlockPos blockPos, Direction direction, LocalPlayer player, ClientLevel level, MultiPlayerGameMode gameMode, boolean localPrediction) {
-        if (player.blockActionRestricted(level, blockPos, gameMode.getPlayerMode())) {
-            return BlockBreakResult.FAILED;
-        }
-        if (!level.getWorldBorder().isWithinBounds(blockPos)) {
-            return BlockBreakResult.FAILED;
-        }
-
-        if (player.getAbilities().instabuild) {
-            PacketUtils.sendPacket(i -> {
-                if (localPrediction) {
-                    destroyBlock(blockPos);
-                }
-                return litematica_printer$GetServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, blockPos, direction, i);
-            });
-            return BlockBreakResult.COMPLETED;
-        }
-
-        if (this.isDestroying && !this.sameDestroyTarget(blockPos)) {
-            PacketUtils.sendPacket(litematica_printer$GetServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.ABORT_DESTROY_BLOCK, this.destroyBlockPos, direction, 0));
-        }
-
-        BlockState blockState = level.getBlockState(blockPos);
-        boolean isSolidBlock = !blockState.isAir();
-        
-        // 空气方块无法破坏
-        if (!isSolidBlock) {
-            return BlockBreakResult.FAILED;
-        }
-        
-        float destroyProgress = blockState.getDestroyProgress(player, level, blockPos);
-
-        if (destroyProgress >= 1.0F ||
-                (Configs.Break.BREAK_INSTANT_MINE.getBooleanValue() && destroyProgress > 0.5F)
-        ) {
-            PacketUtils.sendPacket(sequence -> {
-                if (localPrediction) destroyBlock(blockPos);
-                return litematica_printer$GetServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, blockPos, direction, sequence);
-            });
-            PacketUtils.sendPacket(sequence -> litematica_printer$GetServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK, blockPos, direction, sequence));
-            // 保守一点使用0.6,只测试了0.583333这个数值
-            if (destroyProgress > 0.6F) {
-                return BlockBreakResult.COMPLETED;
-            } else
-                return BlockBreakResult.COMPLETED_WAIT;
-        }
-        
-        // 渐进式破坏：初始化破坏状态
-        this.isDestroying = true;
-        this.destroyBlockPos = blockPos;
-        this.destroyProgress = 0.0F;
-        this.destroyingItem = player.getMainHandItem();
-
-        if (localPrediction) {
-            if (this.destroyProgress == 0.0F) {
-                blockState.attack(level, blockPos, player);
-            }
-            level.destroyBlockProgress(player.getId(), this.destroyBlockPos, this.litematica_printer$GetDestroyStage());
-        }
-        
-        // 发送开始破坏包
-        PacketUtils.sendPacket(sequence -> litematica_printer$GetServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, blockPos, direction, sequence));
-        
-        return BlockBreakResult.IN_PROGRESS;
-    }
+    @Override public void ensureCarriedItemSent() { this.ensureHasSentCarriedItem(); }
 
     @Override
-    public BlockBreakResult litematica_printer$continueDestroyBlock(boolean requestedPrediction, BlockPos blockPos, Direction direction) {
-        //#if MC > 11802
-        boolean localPrediction = requestedPrediction;
-        //#else
-        //$$ boolean localPrediction = false; // 旧版自定义挖掘不参与原版预测回滚，等待服务端更新
-        //#endif
-        LocalPlayer player = minecraft.player;
-        ClientLevel level = minecraft.level;
-        MultiPlayerGameMode gameMode = minecraft.gameMode;
-
-        if (player == null || level == null || gameMode == null) {
-            return BlockBreakResult.FAILED;
-        }
-
-        if (player.getAbilities().instabuild && level.getWorldBorder().isWithinBounds(blockPos)) {
-            PacketUtils.sendPacket(sequence -> {
-                if (localPrediction) destroyBlock(blockPos);
-                return litematica_printer$GetServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, blockPos, direction, sequence);
-            });
-            return BlockBreakResult.COMPLETED;
-        }
-
-        if (ModUtils.isTweakerooLoaded() && ModUtils.isToolSwitchEnabled()) {
-            ModUtils.trySwitchToEffectiveTool(blockPos);
-        }
-        ensureHasSentCarriedItem();
-
-        if (this.isDestroying && this.sameDestroyTarget(blockPos)) {
-            BlockState blockState = level.getBlockState(blockPos);
-            if (blockState.isAir()) {
-                this.isDestroying = false;
-                return BlockBreakResult.COMPLETED;
-            }
-
-            this.destroyProgress += blockState.getDestroyProgress(player, level, blockPos);
-            boolean completed = this.destroyProgress >= litematica_printer$GetBreakingProgressMax();
-
-            if (completed) {
-                this.isDestroying = false;
-                PacketUtils.sendPacket(sequence -> {
-                    if (localPrediction) destroyBlock(blockPos);
-                    return litematica_printer$GetServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK, blockPos, direction, sequence);
-                });
-                this.destroyProgress = 0.0F;
-            }
-
-            if (localPrediction) {
-                level.destroyBlockProgress(player.getId(), this.destroyBlockPos, this.litematica_printer$GetDestroyStage());
-            }
-
-            return completed ? BlockBreakResult.COMPLETED : BlockBreakResult.IN_PROGRESS;
-        }
-
-        return this.litematica_printer$startDestroyBlock(blockPos, direction, player, level, gameMode, localPrediction);
+    public ServerboundPlayerActionPacket actionPacket(
+            ServerboundPlayerActionPacket.Action action, BlockPos pos, Direction direction, int sequence) {
+        return new ServerboundPlayerActionPacket(action, pos, direction, sequence);
     }
 }

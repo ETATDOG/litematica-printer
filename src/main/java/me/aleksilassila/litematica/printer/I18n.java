@@ -1,7 +1,7 @@
 package me.aleksilassila.litematica.printer;
 
 import lombok.Getter;
-import me.aleksilassila.litematica.printer.utils.MessageUtils;
+import me.aleksilassila.litematica.printer.utils.minecraft.StringUtils;
 import net.minecraft.network.chat.MutableComponent;
 import org.jetbrains.annotations.Nullable;
 
@@ -14,23 +14,29 @@ public class I18n {
     public static final I18n AUTO_DISABLE_NOTICE = of("auto_disable_notice");
     public static final I18n FREE_NOTICE = of("free_notice");
 
-    public static final I18n BEDROCK_CREATIVE_MODE = of("bedrock.creative_mode");
-    public static final I18n BEDROCK_MOD_MISSING = of("bedrock.mod_missing");
-    public static final I18n BEDROCK_NOT_SUPPORT = of("bedrock.not_support");
 
-    public static final I18n ICE_CREATIVE_MODE = of("ice.creative_mode");
-    public static final I18n ICE_WATER_TIMEOUT = of("ice.water_timeout");
+    // 下落方块检查提示
+    public static final I18n FALLING_BLOCK_NO_SUPPORT = of("message.falling_block.no_support");
+    public static final I18n FALLING_BLOCK_MISMATCH = of("message.falling_block.mismatch");
 
-    public static final I18n SHULKER_SYNC_TIMEOUT = of("shulker.sync_timeout");
-    public static final I18n SHULKER_TRANSFER_NOT_STARTED = of("shulker.transfer_not_started");
+    // 破基岩模式提示
+    public static final I18n BEDROCK_CREATIVE_MODE = of("message.bedrock.creative_mode");
 
-    public static final I18n INVENTORY_BACKPACK_FULL = of("inventory.backpack_full");
+    // 快捷潜影盒提示
+    public static final I18n SHULKER_MOD_NOT_LOADED = of("message.shulker.mod_not_loaded");
 
-    public static final I18n BREWINGSTAND_LOWER = of("brewingstand.lower");
-    public static final I18n BREWINGSTAND_RAISE = of("brewingstand.raise");
+    // 关闭全部模式提示
+    public static final I18n CLOSE_ALL_MODE_NOTICE = of("message.close_all_mode");
 
-    public static final I18n BLOCK_NO_SUPPORT = of("block.no_support");
-    public static final I18n BLOCK_MISMATCH = of("block.mismatch");
+    // 库存提示
+    public static final I18n INVENTORY_FULL = of("message.inventory.full");
+    public static final I18n INVENTORY_RESTORE_FAILED = of("message.inventory.restore_failed");
+    public static final I18n INVENTORY_SHULKER_OCCUPIED = of("message.inventory.shulker_occupied");
+    public static final I18n RESERVE_ITEM_SKIP = of("message.reserve_item.skip");
+
+    // 缺少材料 HUD
+    public static final I18n MISSING_MATERIAL_TITLE = of("hud.missing.title");
+    public static final I18n MISSING_MATERIAL_OVERFLOW = of("hud.missing.overflow");
 
     private static final String PREFIX_CONFIG = "config";
     private static final String PREFIX_COMMENT = "desc";
@@ -62,42 +68,42 @@ public class I18n {
 
     /*** 获取键名 ***/
     public MutableComponent getName() {
-        return MessageUtils.translatable(this.withPrefixNameKey);
+        return StringUtils.translatable(this.withPrefixNameKey);
     }
 
     /*** 获取键名(带参数) ***/
     public MutableComponent getName(Object... objects) {
-        return MessageUtils.translatable(this.withPrefixNameKey, objects);
+        return StringUtils.translatable(this.withPrefixNameKey, objects);
     }
 
     /*** 获取描述 ***/
     public MutableComponent getDesc() {
-        return MessageUtils.translatable(this.descKey);
+        return StringUtils.translatable(this.descKey);
     }
 
     /*** 获取描述(带参数) ***/
     public MutableComponent getDesc(Object... objects) {
-        return MessageUtils.translatable(this.descKey, objects);
+        return StringUtils.translatable(this.descKey, objects);
     }
 
     /*** 获取配置键名 ***/
     public MutableComponent getConfigName() {
-        return MessageUtils.translatable(this.configNameKey);
+        return StringUtils.translatable(this.configNameKey);
     }
 
     /*** 获取配置键名(带参数) ***/
     public MutableComponent getConfigName(Object... objects) {
-        return MessageUtils.translatable(this.configNameKey, objects);
+        return StringUtils.translatable(this.configNameKey, objects);
     }
 
     /*** 获取配置描述 ***/
     public MutableComponent getConfigDesc() {
-        return MessageUtils.translatable(this.configDescKey);
+        return StringUtils.translatable(this.configDescKey);
     }
 
     /*** 获取配置描述(带参数) ***/
     public MutableComponent getConfigDesc(Object... objects) {
-        return MessageUtils.translatable(this.configDescKey, objects);
+        return StringUtils.translatable(this.configDescKey, objects);
     }
 
     /*** 获取简易键名(一般用于枚举, 会取 "." 最后的文本) ***/

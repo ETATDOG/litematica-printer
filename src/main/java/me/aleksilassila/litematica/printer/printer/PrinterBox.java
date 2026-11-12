@@ -1,11 +1,11 @@
 package me.aleksilassila.litematica.printer.printer;
 
-import me.aleksilassila.litematica.printer.enums.IterationOrderType;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.Vec3i;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.Iterator;
+import java.util.NoSuchElementException;
 import java.util.Objects;
 
 import net.minecraft.core.BlockPos;
@@ -14,10 +14,6 @@ public class PrinterBox implements Iterable<BlockPos> {
     public static final Minecraft client = Minecraft.getInstance();
     public final int minX, minY, minZ;
     public final int maxX, maxY, maxZ;
-    public boolean yIncrement = true;
-    public boolean xIncrement = true;
-    public boolean zIncrement = true;
-    public IterationOrderType iterationMode = IterationOrderType.XZY;
 
     public PrinterBox(int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {
         this.minX = Math.min(minX, maxX);
@@ -26,19 +22,9 @@ public class PrinterBox implements Iterable<BlockPos> {
         this.maxZ = Math.max(minZ, maxZ);
         int rawMinY = Math.min(minY, maxY);
         int rawMaxY = Math.max(minY, maxY);
-        if (client.level != null) {
-            int worldMinY = client.level.getMinY();
-            int worldMaxY = client.level.getMaxY();
-            if (rawMaxY < worldMinY) {
-                this.minY = worldMinY;
-                this.maxY = worldMinY;
-            } else if (rawMinY > worldMaxY) {
-                this.minY = worldMaxY;
-                this.maxY = worldMaxY;
-            } else {
-                this.minY = Math.max(worldMinY, rawMinY);
-                this.maxY = Math.min(worldMaxY, rawMaxY);
-            }
+        if (client != null && client.level != null) {
+            this.minY = Math.max(client.level.getMinY(), rawMinY);
+            this.maxY = Math.min(client.level.getMaxY(), rawMaxY);
         } else {
             this.minY = rawMinY;
             this.maxY = rawMaxY;
@@ -61,6 +47,15 @@ public class PrinterBox implements Iterable<BlockPos> {
         return vec3i.getX() >= this.minX && vec3i.getX() <= this.maxX && vec3i.getY() >= this.minY && vec3i.getY() <= this.maxY && vec3i.getZ() >= this.minZ && vec3i.getZ() <= this.maxZ;
     }
 
+    public boolean sameSectionWindow(PrinterBox other) {
+        return sectionCoord(this.minX) == sectionCoord(other.minX)
+                && sectionCoord(this.maxX) == sectionCoord(other.maxX)
+                && sectionCoord(this.minY) == sectionCoord(other.minY)
+                && sectionCoord(this.maxY) == sectionCoord(other.maxY)
+                && sectionCoord(this.minZ) == sectionCoord(other.minZ)
+                && sectionCoord(this.maxZ) == sectionCoord(other.maxZ);
+    }
+
     public PrinterBox expand(int expandX, int expandY, int expandZ) {
         int minX = this.minX - expandX;
         int minZ = this.minZ - expandZ;
@@ -68,7 +63,7 @@ public class PrinterBox implements Iterable<BlockPos> {
         int maxZ = this.maxZ + expandZ;
         int minY = this.minY - expandY;
         int maxY = this.maxY + expandY;
-        if (client.level != null) {
+        if (client != null && client.level != null) {
             minY = Math.max(client.level.getMinY(), minY);
             maxY = Math.min(client.level.getMaxY(), maxY);
         }
@@ -79,12 +74,6 @@ public class PrinterBox implements Iterable<BlockPos> {
         return this.expand(value, value, value);
     }
 
-
-    public boolean intersects(PrinterBox other) {
-        return this.minX <= other.maxX && this.maxX >= other.minX
-            && this.minY <= other.maxY && this.maxY >= other.minY
-            && this.minZ <= other.maxZ && this.maxZ >= other.minZ;
-    }
 
     @Override
     public @NotNull Iterator<BlockPos> iterator() {
@@ -104,99 +93,54 @@ public class PrinterBox implements Iterable<BlockPos> {
     }
 
     private class BoxIterator implements Iterator<BlockPos> {
-        private int x, y, z;
-        private boolean initialized = false;
+        public BlockPos currPos;
 
         @Override
         public boolean hasNext() {
-            if (!initialized) return true;
-            int tx = xIncrement ? maxX : minX;
-            int ty = yIncrement ? maxY : minY;
-            int tz = zIncrement ? maxZ : minZ;
-            return !(x == tx && y == ty && z == tz);
+            if (currPos == null) return true;
+            int x = currPos.getX();
+            int y = currPos.getY();
+            int z = currPos.getZ();
+
+            return !(x == maxX && y == maxY && z == maxZ);
         }
 
         @Override
         public BlockPos next() {
-            if (!initialized) {
-                x = xIncrement ? minX : maxX;
-                y = yIncrement ? minY : maxY;
-                z = zIncrement ? minZ : maxZ;
-                initialized = true;
-                return new BlockPos(x, y, z);
+            if (!this.hasNext()) {
+                throw new NoSuchElementException();
             }
 
-            // 根据迭代模式内联展开，消除多态派发
-            switch (iterationMode) {
-                case XYZ:
-                    x += xIncrement ? 1 : -1;
-                    if (xIncrement ? x > maxX : x < minX) {
-                        x = xIncrement ? minX : maxX;
-                        y += yIncrement ? 1 : -1;
-                        if (yIncrement ? y > maxY : y < minY) {
-                            y = yIncrement ? minY : maxY;
-                            z += zIncrement ? 1 : -1;
-                        }
-                    }
-                    break;
-                case XZY:
-                    x += xIncrement ? 1 : -1;
-                    if (xIncrement ? x > maxX : x < minX) {
-                        x = xIncrement ? minX : maxX;
-                        z += zIncrement ? 1 : -1;
-                        if (zIncrement ? z > maxZ : z < minZ) {
-                            z = zIncrement ? minZ : maxZ;
-                            y += yIncrement ? 1 : -1;
-                        }
-                    }
-                    break;
-                case YXZ:
-                    y += yIncrement ? 1 : -1;
-                    if (yIncrement ? y > maxY : y < minY) {
-                        y = yIncrement ? minY : maxY;
-                        x += xIncrement ? 1 : -1;
-                        if (xIncrement ? x > maxX : x < minX) {
-                            x = xIncrement ? minX : maxX;
-                            z += zIncrement ? 1 : -1;
-                        }
-                    }
-                    break;
-                case YZX:
-                    y += yIncrement ? 1 : -1;
-                    if (yIncrement ? y > maxY : y < minY) {
-                        y = yIncrement ? minY : maxY;
-                        z += zIncrement ? 1 : -1;
-                        if (zIncrement ? z > maxZ : z < minZ) {
-                            z = zIncrement ? minZ : maxZ;
-                            x += xIncrement ? 1 : -1;
-                        }
-                    }
-                    break;
-                case ZXY:
-                    z += zIncrement ? 1 : -1;
-                    if (zIncrement ? z > maxZ : z < minZ) {
-                        z = zIncrement ? minZ : maxZ;
-                        x += xIncrement ? 1 : -1;
-                        if (xIncrement ? x > maxX : x < minX) {
-                            x = xIncrement ? minX : maxX;
-                            y += yIncrement ? 1 : -1;
-                        }
-                    }
-                    break;
-                case ZYX:
-                    z += zIncrement ? 1 : -1;
-                    if (zIncrement ? z > maxZ : z < minZ) {
-                        z = zIncrement ? minZ : maxZ;
-                        y += yIncrement ? 1 : -1;
-                        if (yIncrement ? y > maxY : y < minY) {
-                            y = yIncrement ? minY : maxY;
-                            x += xIncrement ? 1 : -1;
-                        }
-                    }
-                    break;
+            // 初始化起始位置
+            if (currPos == null) {
+                currPos = new BlockPos(
+                        minX,
+                        minY,
+                        minZ
+                );
+                return currPos;
             }
 
-            return new BlockPos(x, y, z);
+            int x = currPos.getX();
+            int y = currPos.getY();
+            int z = currPos.getZ();
+
+            x++;
+            if (x > maxX) {
+                x = minX;
+                z++;
+                if (z > maxZ) {
+                    z = minZ;
+                    y++;
+                }
+            }
+
+            currPos = new BlockPos(x, y, z);
+            return currPos;
         }
+    }
+
+    private static int sectionCoord(int blockCoord) {
+        return blockCoord >> 4;
     }
 }

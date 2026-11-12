@@ -1,19 +1,15 @@
 package me.aleksilassila.litematica.printer.config.builder;
 
-import fi.dy.masa.malilib.config.IConfigBase;
 import fi.dy.masa.malilib.config.options.ConfigBase;
 import me.aleksilassila.litematica.printer.I18n;
-import me.aleksilassila.litematica.printer.mixin.extension.ConfigExtension;
+import me.aleksilassila.litematica.printer.config.ConfigMetadata;
 import org.jetbrains.annotations.Nullable;
 
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.BooleanSupplier;
-import java.util.function.Consumer;
 
 @SuppressWarnings("unchecked")
 public abstract class BaseConfigBuilder<T extends ConfigBase<?>, B extends BaseConfigBuilder<T, B>> {
     protected final I18n i18n;
-    protected final CopyOnWriteArrayList<Consumer<IConfigBase>> valueChangeCallbacks = new CopyOnWriteArrayList<>();
     protected String nameKey;
     protected String descKey;
     protected @Nullable BooleanSupplier visible;
@@ -29,66 +25,18 @@ public abstract class BaseConfigBuilder<T extends ConfigBase<?>, B extends BaseC
         this(I18n.of(translateKey));
     }
 
-    public B translationAlias(String alias) {
-        I18n i18n = I18n.of(alias);
-        this.nameKey = i18n.getConfigNameKey();
-        this.descKey = i18n.getConfigDescKey();
-        return (B) this;
-    }
-
-    public B setNameKey(String name) {
-        this.nameKey = name;
-        return (B) this;
-    }
-
-    public B setDescKey(String comment) {
-        this.descKey = comment;
-        return (B) this;
-    }
-
-    public B setVisible(boolean visible) {
-        this.visible = visible ? ConfigExtension.litematica_printer$TRUE : ConfigExtension.litematica_printer$FALSE;
-        return (B) this;
-    }
-
     public B setVisible(@Nullable BooleanSupplier visible) {
         this.visible = visible;
         return (B) this;
     }
 
-    public B addValueChangeListener(Consumer<IConfigBase> callback) {
-        if (callback != null) {
-            this.valueChangeCallbacks.add(callback);
-        }
-        return (B) this;
-    }
-
     protected T buildExtension(T config) {
-        buildI18n(config);
-        buildVisible(config);
-        buildValueChangeCallbacks(config);
+        buildMetadata(config);
         return config;
     }
 
-    protected void buildI18n(T config) {
-        ConfigExtension extension = (ConfigExtension) config;
-        extension.litematica_printer$setTranslateNameKey(this.nameKey);
-        extension.litematica_printer$setTranslateCommentKey(this.descKey);
-    }
-
-    protected void buildVisible(T config) {
-        if (visible != null) {
-            ConfigExtension extension = (ConfigExtension) config;
-            extension.litematica_printer$setVisible(this.visible);
-        }
-    }
-
-    protected void buildValueChangeCallbacks(T config) {
-        if (config instanceof ConfigExtension extension && !this.valueChangeCallbacks.isEmpty()) {
-            for (Consumer<IConfigBase> callback : this.valueChangeCallbacks) {
-                extension.litematica_printer$addValueChangeListener(callback);
-            }
-        }
+    protected void buildMetadata(T config) {
+        ConfigMetadata.register(config, this.nameKey, this.descKey, this.visible);
     }
 
     public abstract T build();

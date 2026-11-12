@@ -6,6 +6,11 @@ repositories {
     mavenLocal()
     mavenCentral()
     gradlePluginPortal()
+//    maven("https://maven.fabricmc.net")
+}
+
+kotlin {
+    jvmToolchain(25)
 }
 
 gradlePlugin {

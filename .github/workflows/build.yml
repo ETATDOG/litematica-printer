@@ -1,144 +1,146 @@
-name: _step.build
+name: build
+
 on:
-  workflow_call:
+  # Build production changes and changes to the CI/release paths themselves.
+  push:
+    branches: [master]
+    paths:
+      - 'src/**'
+      - 'versions/**'
+      - 'fabricWrapper/src/**'
+      - 'fabricWrapper/build.gradle.kts'
+      - 'buildSrc/**'
+      - 'gradle/**'
+      - '*.gradle.kts'
+      - 'gradle.properties'
+      - 'gradlew'
+      - 'gradlew.bat'
+      - '.github/workflows/**'
+      - '.github/scripts/**'
+  pull_request:
+    branches: [master]
+    paths:
+      - 'src/**'
+      - 'versions/**'
+      - 'fabricWrapper/src/**'
+      - 'fabricWrapper/build.gradle.kts'
+      - 'buildSrc/**'
+      - 'gradle/**'
+      - '*.gradle.kts'
+      - 'gradle.properties'
+      - 'gradlew'
+      - 'gradlew.bat'
+      - '.github/workflows/**'
+      - '.github/scripts/**'
+  workflow_dispatch:
     inputs:
-      build_type:
-        type: string
-        required: false
-        default: snapshot
-      target_subproject:
-        description: See release.yml, leave it empty to build all
-        type: string
-        required: false
-        default: ''
-      download_dependencies:
-        description: Download dependencies
-        type: boolean
-        required: false
-        default: false
-      publish:
-        description: Publish mods to Github Packages (Only Release)
-        type: boolean
-        required: false
-        default: false
+      validation:
+        description: Test scope (all versions are always compiled and packaged)
+        type: choice
+        default: full
+        options:
+          - full
+          - main
+
+env:
+  IS_THIS_RELEASE: false
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # Allow the Unsafe access used by test fixtures and third-party libraries on Java 25.
+  GRADLE_OPTS: --sun-misc-unsafe-memory-access=allow
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    if: ${{ !contains(github.event.head_commit.message, 'SKIP') }}
-    env:
-      BUILD_TYPE: ${{ inputs.build_type }}
-      GH_USERNAME: ${{ github.event.repository.owner.type == 'Organization' && 'github-actions[bot]' || github.repository_owner }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          fetch-tags: true
 
-      - name: Setup Java 25
+      - name: Setup Java
         uses: actions/setup-java@v5
         with:
-          distribution: 'liberica'
           java-version: '25'
+          # Hosted Ubuntu runners already cache Temurin; avoid downloading a second JDK.
+          distribution: 'temurin'
 
-      - name: Cache Gradle dependencies
-        id: gradle-cache
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          validate-wrappers: true
+          # Keep Minecraft archives in the shared, version-filtered cache below.
+          gradle-home-cache-excludes: caches/fabric-loom
+
+      - name: Cache Loom dependencies and workspace
         uses: actions/cache@v5
         with:
           path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-            ./.gradle
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+            ~/.gradle/caches/fabric-loom/26.*
+            ~/.gradle/caches/fabric-loom/*.json
+            ~/.gradle/caches/fabric-loom/minecraftMaven/net/minecraft/*/26.*
+            ./.gradle/loom-cache/minecraftMaven/net/minecraft/*/26.*
+            ./libs
+          # Do not restore the old bundle containing pre-26 Minecraft versions and assets.
+          key: ${{ runner.os }}-${{ runner.arch }}-loom-26-v3-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', 'build.gradle.kts', 'build.fabric.gradle.kts', 'settings.gradle.kts', 'gradle.properties', 'versions/*/gradle.properties', 'versions/mainProject') }}
           restore-keys: |
-            ${{ runner.os }}-gradle-common
-            ${{ runner.os }}-gradle-
+            ${{ runner.os }}-${{ runner.arch }}-loom-26-v3-
 
-      - name: Make Gradle wrapper executable
+      - name: Make gradle wrapper executable
         run: chmod +x ./gradlew
 
-      - name: Download dependencies
-        if: |
-          inputs.download_dependencies == true || 
-          steps.gradle-cache.outputs.cache-hit != 'true' ||
-          contains(github.event.head_commit.message, 'DEPS')
-        run: ./gradlew dependencies --stacktrace
+      - name: Build fabricWrapper subproject
+        shell: bash
         env:
-          BUILD_ID: ${{ github.run_number }}
+          CI_VALIDATION: ${{ github.event_name == 'push' && 'main' || inputs.validation || 'full' }}
+        run: >-
+          ./gradlew :fabricWrapper:build -x jacocoTestCoverageVerification
+          --init-script .github/scripts/ci-build.init.gradle "-PciValidation=$CI_VALIDATION"
+          --no-parallel --max-workers=2 --stacktrace --console=plain --profile
 
-      - name: Build
-        run: |
-          if [ -z "${{ inputs.target_subproject }}" ]; then
-              echo "Building all subprojects"
-              ./gradlew build --stacktrace
-          else
-              args=$(echo "${{ inputs.target_subproject }}" | tr ',' '\n' | sed 's/$/:build/' | paste -sd ' ')
-              echo "Building with arguments=$args"
-              ./gradlew $args --stacktrace
-          fi
-        env:
-          BUILD_ID: ${{ github.run_number }}
-
-      - name: Upload artifacts (summary part need)
+      - name: Capture Gradle timing report
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
-          name: build-artifacts
-          path: versions/*/build/libs/
+          name: gradle-profile
+          path: build/reports/profile/
+          if-no-files-found: ignore
+          retention-days: 7
 
-      - name: Upload versionpack artifacts
+      - name: Delete wrapper sources jar
+        run: |
+          find fabricWrapper/build/libs/ -name "*-sources.jar" -delete
+
+      - name: Capture versionpack
         uses: actions/upload-artifact@v7
         with:
           name: versionpack
-          path: fabricWrapper/build/libs/
-
-      - name: Upload multi-version artifacts
-        uses: actions/upload-artifact@v7
-        with:
           path: fabricWrapper/build/libs/*.jar
+          if-no-files-found: error
+          retention-days: 1
           archive: false
 
-      - name: Collect mod artifacts
-        run: |
-          shopt -s extglob
-          mkdir mod-jars
-          for jar in versions/*/build/libs/!(*-@(dev|sources|shadow)).jar; do
-              cp -p "$jar" mod-jars/
-          done
-          sha256sum mod-jars/*
-          ls -l mod-jars/
-
-      - name: Upload mod artifacts
+      - name: Capture standalone version JARs
         uses: actions/upload-artifact@v7
         with:
-          name: single-version
-          path: mod-jars/
+          name: version-jars
+          path: fabricWrapper/build/libs/jars/
+          if-no-files-found: error
+          retention-days: 1
 
-  summary:
-    runs-on: ubuntu-latest
-    if: ${{ !contains(github.event.head_commit.message, 'SKIP') }}
-    needs:
-      - build
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Setup Python 3.12
-        uses: actions/setup-python@v6
-        with:
-          python-version: 3.12
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v8
-        with:
-          name: build-artifacts
-          path: build-artifacts
-
-      - name: Make build summary
-        run: |
-          pip install jproperties
-          python .github/workflows/scripts/summary.py
+      - name: Publish development build to Modrinth
+        if: >-
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/master' &&
+          github.repository == 'Yur1Ca/litematica-printer'
+        shell: bash
         env:
-          TARGET_SUBPROJECT: ${{ inputs.target_subproject }}
+          MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
+          MODRINTH_VERSION_TYPE: alpha
+          MODRINTH_COMMIT_SHA: ${{ github.sha }}
+          MODRINTH_REPOSITORY: ${{ github.repository }}
+        run: bash .github/scripts/publish-modrinth.sh

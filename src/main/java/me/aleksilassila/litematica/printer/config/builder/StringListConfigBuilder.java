@@ -3,6 +3,7 @@ package me.aleksilassila.litematica.printer.config.builder;
 import com.google.common.collect.ImmutableList;
 import fi.dy.masa.malilib.config.options.ConfigStringList;
 import me.aleksilassila.litematica.printer.I18n;
+import me.aleksilassila.litematica.printer.config.PrinterConfigOptions;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
@@ -74,7 +75,7 @@ public class StringListConfigBuilder extends BaseConfigBuilder<ConfigStringList,
 
     @Override
     public ConfigStringList build() {
-        ConfigStringList config = new ConfigStringList(i18n.getNameKey(), defaultValue, descKey);
+        ConfigStringList config = new PrinterConfigOptions.StringListOption(i18n.getNameKey(), defaultValue, descKey);
         return buildExtension(config);
     }
 }

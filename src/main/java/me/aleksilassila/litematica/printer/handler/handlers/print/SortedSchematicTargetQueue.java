@@ -1,0 +1,282 @@
+package me.aleksilassila.litematica.printer.handler.handlers.print;
+
+import fi.dy.masa.litematica.world.WorldSchematic;
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
+import it.unimi.dsi.fastutil.longs.LongSet;
+import me.aleksilassila.litematica.printer.handler.scan.ScanEngine;
+import me.aleksilassila.litematica.printer.core.diagnostics.RuntimeTiming.Stage;
+import me.aleksilassila.litematica.printer.handler.scan.ScanIntent;
+import me.aleksilassila.litematica.printer.handler.scan.ScanAvailability;
+import me.aleksilassila.litematica.printer.handler.scan.ScanCandidateIterable;
+import me.aleksilassila.litematica.printer.config.Configs;
+import me.aleksilassila.litematica.printer.printer.PrinterBox;
+import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.level.block.FallingBlock;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.Vec3;
+
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.Deque;
+import java.util.Iterator;
+import java.util.List;
+import java.util.function.Predicate;
+
+public final class SortedSchematicTargetQueue implements ScanCandidateIterable {
+    private static final int MAX_SORT_BUFFER = 4096;
+    private final ScanEngine scanEngine;
+    private final Deque<BlockPos> queue = new ArrayDeque<>();
+    private final LongSet queuedKeys = new LongOpenHashSet();
+    private List<PrinterBox> boxes = List.of();
+    private boolean hasMoreSource;
+    private long lastFillTick = Long.MIN_VALUE;
+    private long lastDirtyVersion = Long.MIN_VALUE;
+    private long lastPrintSourceRevision = Long.MIN_VALUE;
+
+    public SortedSchematicTargetQueue(ScanEngine scanEngine) {
+        this.scanEngine = scanEngine;
+    }
+
+    public void clear() {
+        this.queue.clear();
+        this.queuedKeys.clear();
+        this.boxes = List.of();
+        this.hasMoreSource = false;
+        this.lastFillTick = Long.MIN_VALUE;
+        this.lastDirtyVersion = Long.MIN_VALUE;
+        this.lastPrintSourceRevision = Long.MIN_VALUE;
+    }
+
+    public Iterable<BlockPos> iterable(List<PrinterBox> sourceBoxes, ClientLevel level, WorldSchematic schematic, LocalPlayer player, int scanGuardLimit) {
+        return this.iterable(sourceBoxes, level, schematic, player, scanGuardLimit, true, pos -> true);
+    }
+
+    public Iterable<BlockPos> iterable(List<PrinterBox> sourceBoxes, ClientLevel level,
+                                       WorldSchematic schematic, LocalPlayer player, int scanGuardLimit,
+                                       boolean fillWhenBuffered, Predicate<BlockPos> candidateFilter) {
+        if (!this.boxes.equals(sourceBoxes)) {
+            this.queue.clear();
+            this.queuedKeys.clear();
+            this.hasMoreSource = true;
+            this.lastFillTick = Long.MIN_VALUE;
+        }
+        this.boxes = List.copyOf(sourceBoxes);
+        this.fill(sourceBoxes, level, schematic, player, scanGuardLimit, fillWhenBuffered, candidateFilter);
+        return this;
+    }
+
+    public boolean hasPendingWork() {
+        return !this.queue.isEmpty() || this.hasMoreSource;
+    }
+
+    @Override
+    public ScanAvailability availability() {
+        if (!this.queue.isEmpty()) {
+            return ScanAvailability.READY;
+        }
+        return this.hasMoreSource ? ScanAvailability.PAUSED : ScanAvailability.COMPLETE;
+    }
+
+    @Override
+    public boolean isBuffered() {
+        return true;
+    }
+
+    public void requeue(BlockPos pos) {
+        if (pos == null || this.queuedKeys.add(ScanEngine.key(pos))) {
+            if (pos != null) {
+                this.queue.addLast(pos.immutable());
+            }
+        }
+    }
+
+    public void remove(BlockPos pos) {
+        if (pos == null) return;
+        long key = ScanEngine.key(pos);
+        this.queuedKeys.remove(key);
+        this.queue.removeIf(candidate -> ScanEngine.key(candidate) == key);
+    }
+
+    private void fill(List<PrinterBox> sourceBoxes, ClientLevel level, WorldSchematic schematic,
+                      LocalPlayer player, int scanGuardLimit, boolean fillWhenBuffered,
+                      Predicate<BlockPos> candidateFilter) {
+        // Observe schematic replacement even after a clean queue has exhausted its old source.
+        // Creating the iterable does not consume a candidate or advance its cursor.
+        Iterable<BlockPos> candidates = this.scanEngine.iterable(
+                "print_sorted", sourceBoxes, level, schematic, player, scanGuardLimit,
+                ScanIntent.PRINT, pos -> true, candidateFilter
+        );
+        long printSourceRevision = this.scanEngine.printSourceRevision();
+        if (printSourceRevision != this.lastPrintSourceRevision) {
+            this.queue.clear();
+            this.queuedKeys.clear();
+            this.hasMoreSource = true;
+            this.lastFillTick = Long.MIN_VALUE;
+            this.lastPrintSourceRevision = printSourceRevision;
+        }
+        // Source identity changes are observed before returning old work, but ready work does
+        // not wait for candidate production. The owner replenishes after its execution slice.
+        if (!fillWhenBuffered && !this.queue.isEmpty()) return;
+        long currentTick = level.getGameTime();
+        long dirtyVersion = this.scanEngine.dirtyVersion();
+        boolean dirtyChanged = dirtyVersion != this.lastDirtyVersion;
+        int configuredThroughput = Configs.Placement.PLACE_BLOCKS_PER_TICK.getIntegerValue();
+        int targetBufferSize = configuredThroughput > 0
+                ? Math.min(MAX_SORT_BUFFER, Math.max(256, configuredThroughput * 16))
+                : MAX_SORT_BUFFER;
+        int lowWater = Math.max(configuredThroughput * 4, 16);
+        if (!shouldRefill(
+                currentTick,
+                this.lastFillTick,
+                dirtyChanged,
+                this.hasMoreSource,
+                this.queue.size(),
+                targetBufferSize,
+                lowWater
+        )) {
+            return;
+        }
+        this.lastFillTick = currentTick;
+        this.lastDirtyVersion = dirtyVersion;
+        int remainingBuffer = Math.max(1, targetBufferSize - this.queue.size());
+        if (!this.queue.isEmpty()) {
+            int refillSlice = configuredThroughput > 0 ? Math.max(16, configuredThroughput * 2) : 256;
+            remainingBuffer = Math.min(remainingBuffer, refillSlice);
+        }
+        int collectLimit = scanGuardLimit > 0
+                ? Math.min(scanGuardLimit, remainingBuffer)
+                : remainingBuffer;
+        Item heldItem = player.getMainHandItem().getItem();
+        Vec3 eye = player.getEyePosition();
+        Vec3 view = player.getLookAngle().normalize();
+        List<TargetScore> targets = new ArrayList<>();
+        this.hasMoreSource = false;
+        long collectionStart = this.scanEngine.timing().start();
+        try {
+            Iterator<BlockPos> iterator = candidates.iterator();
+            // hasNext() can advance the scan session. Check capacity before even probing it,
+            // so the first candidate of the next batch remains in the source cursor.
+            while (targets.size() < collectLimit && iterator.hasNext()) {
+                BlockPos candidate = iterator.next();
+                if (this.queuedKeys.add(ScanEngine.key(candidate))) {
+                    targets.add(scoreTarget(schematic, heldItem, eye, view, candidate));
+                }
+            }
+            this.hasMoreSource = targets.size() >= collectLimit;
+            if (candidates instanceof ScanCandidateIterable scanSource) {
+                if (scanSource.availability() == ScanAvailability.PAUSED) this.hasMoreSource = true;
+                else if (scanSource.availability() == ScanAvailability.COMPLETE) this.hasMoreSource = false;
+            }
+        } finally {
+            this.scanEngine.timing().finish("print", Stage.PRINT_COLLECTION, collectionStart);
+        }
+        long sortStart = this.scanEngine.timing().start();
+        try { targets.sort(TargetScore.COMPARATOR); }
+        finally { this.scanEngine.timing().finish("print", Stage.PRINT_SORT, sortStart); }
+        for (TargetScore target : targets) {
+            this.queue.addLast(target.pos());
+        }
+    }
+
+    static boolean shouldRefill(
+            long currentTick,
+            long lastFillTick,
+            boolean dirtyChanged,
+            boolean hasMoreSource,
+            int queueSize,
+            int targetBufferSize,
+            int lowWater
+    ) {
+        if (lastFillTick == currentTick || queueSize >= targetBufferSize) {
+            return false;
+        }
+        if (!dirtyChanged && !hasMoreSource) {
+            return false;
+        }
+        return dirtyChanged || queueSize < lowWater;
+    }
+
+    @Override
+    public Iterator<BlockPos> iterator() {
+        return new Iterator<>() {
+            // Retry insertions belong to the next iteration pass. Reading the live queue until it
+            // becomes empty lets a failed target remove and requeue itself forever, especially
+            // when placeBlocksPerTick=0 disables the effective-execution limit.
+            private int remaining = queue.size();
+
+            @Override
+            public boolean hasNext() {
+                return this.remaining > 0 && !queue.isEmpty();
+            }
+
+            @Override
+            public BlockPos next() {
+                if (this.remaining > 0 && !queue.isEmpty()) {
+                    this.remaining--;
+                    BlockPos result = queue.removeFirst();
+                    queuedKeys.remove(ScanEngine.key(result));
+                    return result;
+                }
+                throw new java.util.NoSuchElementException("sorted schematic target queue is exhausted");
+            }
+        };
+    }
+
+    private static TargetScore scoreTarget(
+            WorldSchematic schematic,
+            Item heldItem,
+            Vec3 eye,
+            Vec3 view,
+            BlockPos pos
+    ) {
+        double dx = pos.getX() + 0.5D - eye.x;
+        double dy = pos.getY() + 0.5D - eye.y;
+        double dz = pos.getZ() + 0.5D - eye.z;
+        double distanceSqr = dx * dx + dy * dy + dz * dz;
+        double viewAngleScore = distanceSqr < 1.0E-6D
+                ? 0.0D
+                : -(view.x * dx + view.y * dy + view.z * dz) / Math.sqrt(distanceSqr);
+        BlockState requiredState = schematic.getBlockState(pos);
+        return new TargetScore(
+                pos,
+                requiredState.getBlock().asItem() != heldItem,
+                requiredState.getBlock() instanceof FallingBlock,
+                pos.getY(),
+                distanceSqr,
+                viewAngleScore
+        );
+    }
+
+    static record TargetScore(
+            BlockPos pos,
+            boolean heldItemMismatch,
+            boolean fallingBlock,
+            int y,
+            double distanceSqr,
+            double viewAngleScore
+    ) {
+        /**
+         * A strict total order is required here: TimSort is allowed to reject a comparator whose
+         * ordering changes depending on the pair being compared.  In particular, comparing two
+         * falling blocks by Y but a falling/non-falling pair by distance is not transitive.
+         *
+         * <p>Let ordinary placements make progress before falling dependencies. Falling targets
+         * must then be ordered bottom-up before material locality; otherwise a held upper anvil
+         * can outrank a lower sand support and repeatedly fail the support check. Coordinates are
+         * the deterministic final tie-breaker so incremental batches produce the same order.</p>
+         */
+        static final Comparator<TargetScore> COMPARATOR = Comparator
+                .comparing(TargetScore::fallingBlock)
+                .thenComparingInt(score -> score.fallingBlock ? score.y : 0)
+                .thenComparing(TargetScore::heldItemMismatch)
+                .thenComparingDouble(TargetScore::distanceSqr)
+                .thenComparingDouble(TargetScore::viewAngleScore)
+                .thenComparingInt(score -> score.pos.getY())
+                .thenComparingInt(score -> score.pos.getX())
+                .thenComparingInt(score -> score.pos.getZ());
+    }
+}

@@ -1,92 +1,46 @@
 package me.aleksilassila.litematica.printer.config;
 
+import fi.dy.masa.malilib.hotkeys.IKeybind;
+import fi.dy.masa.malilib.hotkeys.KeyAction;
 import me.aleksilassila.litematica.printer.gui.ConfigUi;
-import me.aleksilassila.litematica.printer.handler.ModuleManager;
-import me.aleksilassila.litematica.printer.printer.ActionManager;
-import me.aleksilassila.litematica.printer.utils.MessageUtils;
-import me.aleksilassila.litematica.printer.compat.BedrockCompat;
+import me.aleksilassila.litematica.printer.utils.mods.ChestTrackerBridge;
 import net.minecraft.client.Minecraft;
 
-// 按键与回调注册
+
+//监听按键
 public class HotkeysCallback {
     private static final Minecraft client = Minecraft.getInstance();
 
-    public static void initCallbacks() {
-        // 打开设置界面
-        Configs.Hotkeys.OPEN_SCREEN.getKeybind().setCallback((action, keybind) -> {
-            if (client.player != null && client.level != null) {
-                client.setScreen(new ConfigUi());
-            }
+    public static boolean onKeyAction(KeyAction action, IKeybind key) {
+        if (client.player == null || client.level == null) {
+            return false;
+        }
+        if (key == Configs.Hotkeys.OPEN_SCREEN.getKeybind()) {
+            //#if MC > 260100
+            //$$ client.gui.setScreen(new ConfigUi());
+            //#else
+            client.setScreen(new ConfigUi());
+            //#endif
             return true;
-        });
-        Configs.Hotkeys.CYCLE_MODE.getKeybind().setCallback((action, keybind) -> {
-            var modes = new fi.dy.masa.malilib.config.options.ConfigBooleanHotkeyed[]{
-                    Configs.Print.ENABLED,
-                    Configs.Mine.ENABLED,
-                    Configs.Fill.ENABLED,
-                    Configs.Fluid.ENABLED,
-                    Configs.Bedrock.ENABLED
-            };
-            int current = -1;
-            for (int i = 0; i < modes.length; i++) {
-                if (modes[i].getBooleanValue()) {
-                    current = i;
-                    break;
-                }
-            }
-            for (var m : modes) m.setBooleanValue(false);
-            int next = (current + 1) % modes.length;
-            modes[next].setBooleanValue(true);
-            MessageUtils.setOverlayMessage(modes[next].getPrettyName());
+        }
+
+        if (key == Configs.Hotkeys.SYNC_INVENTORY.getKeybind()) {
+            me.aleksilassila.litematica.printer.runtime.RuntimeAccess.get().containerSync().toggle();
             return true;
-        });
-
-        Configs.Hotkeys.CLOSE_ALL_MODE.getKeybind().setCallback((action, keybind) -> {
-            if (keybind.isKeybindHeld()) {
-                Configs.Print.ENABLED.setBooleanValue(false);
-                Configs.Mine.ENABLED.setBooleanValue(false);
-                Configs.Fill.ENABLED.setBooleanValue(false);
-                Configs.Fluid.ENABLED.setBooleanValue(false);
-                Configs.Bedrock.ENABLED.setBooleanValue(false);
-                Configs.Core.WORK_SWITCH.setBooleanValue(false);
-                MessageUtils.setOverlayMessage(MessageUtils.nullToEmpty("已关闭全部模式"));
-            }
+        }
+        if (key == Configs.Hotkeys.CACHE_SELECTION_CONTAINERS.getKeybind()) {
+            int added = ChestTrackerBridge.addSelectionToCache();
+            me.aleksilassila.litematica.printer.utils.minecraft.MessageUtils.setOverlayMessage(
+                    "Chest Tracker: 已加入 " + added + " 个选区容器");
             return true;
-        });
+        }
+        if (key == Configs.Hotkeys.CLEAR_CONTAINER_CACHE.getKeybind()) {
+            int removed = ChestTrackerBridge.clearSelectionCache();
+            me.aleksilassila.litematica.printer.utils.minecraft.MessageUtils.setOverlayMessage(
+                    "Chest Tracker: 已清除 " + removed + " 个容器缓存");
+            return true;
+        }
 
-        // 工作开关
-        Configs.Core.WORK_SWITCH.setValueChangeCallback(b -> {
-            if (!b.getBooleanValue()) {
-                ModuleManager.PRINT.setWatingForWaterPos(null);
-                ActionManager.INSTANCE.clearQueue();
-                if (BedrockCompat.isAvailable()) {
-                    if (BedrockCompat.isWorking()) {
-                        BedrockCompat.setWorking(false);
-                        BedrockCompat.setFeatureEnable(true);
-                    }
-                }
-            }
-        });
-
-        // 切换基岩功能时，关闭破基岩
-        Configs.Bedrock.ENABLED.setValueChangeCallback(b -> {
-            if (!b.getBooleanValue()) {
-                if (BedrockCompat.isAvailable()) {
-                    if (BedrockCompat.isWorking()) {
-                        BedrockCompat.setWorking(false);
-                        BedrockCompat.setFeatureEnable(true);
-                    }
-                }
-            }
-        });
-
-        // 特殊设置时，自动刷新界面
-        Configs.Print.FILL_COMPOSTER.setValueChangeCallback(b -> ConfigUi.refresh());
-        Configs.Break.BREAK_LIMITER.setValueChangeCallback(b -> ConfigUi.refresh());
-        Configs.Break.BREAK_LIMIT.setValueChangeCallback(b -> ConfigUi.refresh());
-        Configs.Mine.EXCAVATE_LIMITER.setValueChangeCallback(b -> ConfigUi.refresh());
-        Configs.Mine.EXCAVATE_LIMIT.setValueChangeCallback(b -> ConfigUi.refresh());
-        Configs.Fill.FILL_BLOCK_MODE.setValueChangeCallback(b -> ConfigUi.refresh());
-        Configs.Core.LAG_CHECK.setValueChangeCallback(b -> ConfigUi.refresh());
+        return false;
     }
 }

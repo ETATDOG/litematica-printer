@@ -1,26 +1,42 @@
 package me.aleksilassila.litematica.printer.mixin.printer.mc;
 
-import me.aleksilassila.litematica.printer.mixin.extension.MultiPlayerGameModeExtension;
-import me.aleksilassila.litematica.printer.utils.PacketUtils;
+import me.aleksilassila.litematica.printer.runtime.ClientBlockUpdateRouter;
+import me.aleksilassila.litematica.printer.utils.minecraft.PredictiveAction;
+import me.aleksilassila.litematica.printer.utils.minecraft.NetworkUtils;
 import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.core.BlockPos;
+import net.minecraft.network.protocol.Packet;
+import net.minecraft.network.protocol.game.ServerGamePacketListener;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.Vec3;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(ClientLevel.class)
-public abstract class MixinClientLevel implements PacketUtils.SequenceExtension {
+public abstract class MixinClientLevel implements NetworkUtils.SequenceExtension {
 
-    //#if MC > 11802
     @Final
     @Shadow
     private net.minecraft.client.multiplayer.prediction.BlockStatePredictionHandler blockStatePredictionHandler;
 
     @Override
-    public void litematica_printer$sendPrediction(MultiPlayerGameModeExtension.PredictiveAction action) {
-        // 预测上下文需覆盖本地世界修改和发包，服务端拒绝时才能正确回滚。
-        try (net.minecraft.client.multiplayer.prediction.BlockStatePredictionHandler prediction = blockStatePredictionHandler.startPredicting()) {
-            PacketUtils.sendPacket(action.predict(prediction.currentSequence()));
+    public Packet<ServerGamePacketListener> litematica_printer3$predict(PredictiveAction action) {
+        try (net.minecraft.client.multiplayer.prediction.BlockStatePredictionHandler pendingUpdateManager = this.blockStatePredictionHandler.startPredicting()) {
+            return action.predict(pendingUpdateManager.currentSequence());
         }
     }
-    //#endif
+
+    @Inject(method = "syncBlockState", at = @At("RETURN"))
+    private void observePredictionReconciliation(
+            BlockPos pos,
+            BlockState authoritativeState,
+            Vec3 playerPosition,
+            CallbackInfo ci
+    ) {
+        ClientBlockUpdateRouter.accept(pos, authoritativeState);
+    }
 }

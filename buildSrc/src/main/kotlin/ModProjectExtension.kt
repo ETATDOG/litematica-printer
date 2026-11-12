@@ -1,6 +1,6 @@
-import org.gradle.api.Project
 import org.gradle.api.GradleException
 import org.gradle.api.JavaVersion
+import org.gradle.api.Project
 import java.io.File
 
 fun Project.propOrNull(key: String) = findProperty(key)
@@ -24,7 +24,6 @@ val Project.modName get() = propStr("mod_name")
 val Project.modVersion get() = propStr("mod_version")
 val Project.modMavenGroup get() = propStr("mod_maven_group")
 val Project.modArchivesBaseName get() = propStr("mod_archives_base_name")
-val modBuildTypeEnv: String? = System.getenv("BUILD_TYPE")
 
 val Project.modDescription get() = propStrOrNull("mod_description")
 val Project.modHomepage get() = propStrOrNull("mod_homepage")
@@ -37,69 +36,36 @@ val Project.mcVersionInt get() = propStrOrNull("mcVersion")?.toIntOrNull() ?: -1
 val Project.fabricLoaderVersion get() = propStrOrNull("loader_version")
 val Project.fabricApiVersion get() = propStrOrNull("fabric_version")
 
-val Project.malilib get() = propStrOrNull("malilib_dependency")
-val Project.litematica get() = propStrOrNull("litematica_dependency")
+val Project.malilib get() = propStrOrNull("malilib")
+val Project.litematica get() = propStrOrNull("litematica")
 
 val Project.lombokVersion get() = propStr("lombok_version")
+val Project.githubRunNumber get() = System.getenv("GITHUB_RUN_NUMBER")?.takeIf { it.isNotBlank() }
+val Project.isReleaseWorkflow get() = System.getenv("IS_THIS_RELEASE")?.equals("true", ignoreCase = true) == true
 
-val Project.javaVersion
-    get() = when {
-        mcVersionInt >= 260000 -> JavaVersion.VERSION_25
-        mcVersionInt >= 12005 -> JavaVersion.VERSION_21
-        mcVersionInt >= 11800 -> JavaVersion.VERSION_17
-        mcVersionInt >= 11700 -> JavaVersion.VERSION_16
-        else -> JavaVersion.VERSION_1_8
+private val Project.ciBuildVersion: String?
+    get() = githubRunNumber?.let { buildNumber ->
+        if (isReleaseWorkflow) "beta$buildNumber" else "dev$buildNumber"
     }
+
+val Project.javaVersion get() = JavaVersion.VERSION_25
 val Project.mixinJavaVersion get() = "JAVA_${javaVersion}"
 
-val Project.fullProjectVersion: String get() = getFullProjectVersion(mcVersion, modVersion)
-
-private fun getCommitHash(workDir: File = File(".")): String? {
-    return try {
-        val process = ProcessBuilder("git", "rev-parse", "--short", "HEAD")
-            .directory(workDir)
-            .redirectErrorStream(true)
-            .start()
-        val output = process.inputStream.bufferedReader().readText().trim()
-        val exitCode = process.waitFor()
-        if (exitCode == 0) output else null
-    } catch (e: Exception) {
-        e.printStackTrace()
-        null
-    }
+val Project.fullProjectVersion: String get() {
+    return ciBuildVersion ?: "$modVersion-local"
 }
 
-private fun getCommitCountNumber(workDir: File = File(".")): Int? {
-    return try {
-        val process = ProcessBuilder("git", "rev-list", "--count", "HEAD")
-            .directory(workDir)
-            .redirectErrorStream(true)
-            .start()
-        val output = process.inputStream.bufferedReader().readText().trim()
-        val exitCode = process.waitFor()
-        if (exitCode == 0) output.toInt() else null
-    } catch (e: Exception) {
-        e.printStackTrace()
-        null
-    }
-}
+private val Project.modVersionFlavorSuffix: String
+    get() = modVersion.substringAfter('-', "").let { if (it.isEmpty()) "" else "-$it" }
 
-val buildType: String? = when (modBuildTypeEnv) {
-    "snapshot"  -> "snapshot"
-    "pr"        -> "pr"
-    "release"   -> "release"
-    else        -> "development"
-}
-
-private fun getFullProjectVersion(mcVersion: String?, modVersion: String): String {
-    val commitCount     = getCommitCountNumber()
-    val commitHash      = getCommitHash()
-    return if (buildType == "release") {
-        if (mcVersion == null)  modVersion
-        else                    "${modVersion}-mc${mcVersion}"
-    } else {
-        if (mcVersion == null)  "${modVersion}-${commitCount}-${commitHash}-${buildType}"
-        else                    "${modVersion}-mc${mcVersion}-${commitCount}-${commitHash}-${buildType}"
+val Project.artifactVersion: String get() {
+    val buildNumber = githubRunNumber
+    val baseVersion = mcVersion ?: modVersion.substringBefore('-')
+    val flavorSuffix = modVersionFlavorSuffix
+    return when {
+        buildNumber != null && isReleaseWorkflow -> "$baseVersion$flavorSuffix-beta$buildNumber"
+        buildNumber != null -> "$baseVersion$flavorSuffix-dev$buildNumber"
+        else -> "$baseVersion$flavorSuffix-local"
     }
 }
 
@@ -113,10 +79,15 @@ val Project.placeholderProps: Map<String, Any?>
         "mod_homepage" to modHomepage,
         "mod_license" to modLicense,
         "mod_sources" to modSources,
-        "loader_version" to fabricLoaderVersion,
-        "fabric_api_version" to fabricApiVersion,
         "minecraft_dependency" to mcDependency,
         "compatibility_level" to mixinJavaVersion,
+        "beacon_client_mixins" to if (mcVersionInt < 260200) {
+            "\"printer.mc.BeaconBlockEntityAccessor\",\n" +
+                    "    \"printer.mc.BeaconButtonAccessor\",\n" +
+                    "    \"printer.mc.BeaconScreenMixin\","
+        } else {
+            ""
+        },
         "malilib" to malilib,
         "litematica" to litematica
     ).filterValues { it != null }.mapValues { it.value!! }

@@ -1,0 +1,27 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "me.aleksilassila.litematica.printer.mixin",
+  "compatibilityLevel": "${compatibility_level}",
+  "mixins": [
+    "printer.litematica.EasyPlaceUtilsAccessor",
+    "printer.litematica.InventoryUtilsAccessor",
+    "printer.litematica.MixinInventoryUtils",
+    "printer.litematica.MixinSchematicPickHotkeys",
+    "printer.litematica.MixinSchematicPickUseKey",
+    "printer.litematica.MixinEasyPlaceUtils",
+    "printer.litematica.MixinMaterialListEntry",
+    "printer.malilib.GuiListBaseAccessor",
+    "printer.litematica.MixinMaterialListSorter",
+    "printer.litematica.MixinMaterialListHudRenderer",
+    "printer.litematica.MixinWidgetMaterialListEntry",
+    "printer.litematica.MixinChunkRendererSchematicVbo",
+    "printer.litematica.MixinChunkRenderDispatcherSchematic"
+  ],
+  "client": [
+    "printer.litematica.gui.MixinLitematicaGuiMainMenu"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

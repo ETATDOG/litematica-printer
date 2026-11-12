@@ -1,5 +1,3 @@
-import groovy.json.JsonSlurper
-
 pluginManagement {
     repositories {
         mavenLocal()
@@ -10,45 +8,67 @@ pluginManagement {
     }
     resolutionStrategy {
         eachPlugin {
-            if (requested.id.id == "com.replaymod.preprocess") {
-                useModule("com.github.Fallen-Breath:preprocessor:${requested.version}")
+            when (requested.id.id) {
+                "com.replaymod.preprocess" -> {
+                    useModule("com.github.Fallen-Breath:preprocessor:${requested.version}")
+                }
             }
         }
     }
 }
 
+plugins {
+    id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
+}
 
-val jsonFile = file("settings.json")
-val jsonText = jsonFile.readText()
-@Suppress("UNCHECKED_CAST")
-val settings = JsonSlurper().parseText(jsonText) as Map<String, Any>
-@Suppress("UNCHECKED_CAST")
-val versions = settings["versions"] as List<String>
+val versions = listOf(
+    "26.1", "26.2", "26.3"
+)
+val mainProjectVersion = file("versions/mainProject").readText().trim()
+require(mainProjectVersion in versions) {
+    "Main project '$mainProjectVersion' is not a supported Minecraft version"
+}
+val preprocessParentChain = mapOf(
+    "26.2" to "26.1",
+    "26.3" to "26.2"
+)
 
-for (version in versions) {
-    include(":$version")
-    project(":$version").apply {
-        projectDir = file("versions/$version")
-        buildFileName = if (parseMcVersionToNumber(version) > 260000) {
-            "../../build.unobfuscated.gradle.kts"
-        } else {
-            "../../build.obfuscated.gradle.kts"
+fun expandWithPreprocessParents(requested: List<String>): List<String> {
+    val expanded = linkedSetOf<String>()
+    requested.forEach { version ->
+        var current: String? = version
+        while (current != null && expanded.add(current)) {
+            current = preprocessParentChain[current]
+        }
+    }
+    return expanded.toList()
+}
+
+val requestedVersions = System.getenv("TARGET_MC_VERSIONS")
+    ?.split(",")
+    ?.map { it.trim() }
+    ?.filter { it.isNotEmpty() }
+    ?.distinct()
+
+val selectedVersions = when {
+    requestedVersions.isNullOrEmpty() -> versions
+    else -> {
+        val unknownVersions = requestedVersions - versions.toSet()
+        require(unknownVersions.isEmpty()) {
+            "Unknown TARGET_MC_VERSIONS entries: ${unknownVersions.joinToString(", ")}"
+        }
+        expandWithPreprocessParents(requestedVersions).let { expanded ->
+            if (mainProjectVersion in expanded) expanded else expanded + mainProjectVersion
         }
     }
 }
 
-include(":fabricWrapper")
-
-fun parseMcVersionToNumber(mcVersionStr: String): Int {
-    if (mcVersionStr.isBlank()) return 0
-    return try {
-        val cleanVersion = mcVersionStr.split("-")[0].replace(Regex("[^0-9.]"), "")
-        val versionParts = cleanVersion.split(".").filter { it.isNotEmpty() }
-        val major = versionParts.getOrNull(0)?.toIntOrNull() ?: 0
-        val minor = versionParts.getOrNull(1)?.toIntOrNull() ?: 0
-        val patch = versionParts.getOrNull(2)?.toIntOrNull() ?: 0
-        major * 10000 + minor * 100 + patch
-    } catch (_: Exception) {
-        0
+for (version in selectedVersions) {
+    include(":$version")
+    project(":$version").apply {
+        projectDir = file("versions/$version")
+        buildFileName = "../../build.fabric.gradle.kts"
     }
 }
+
+include(":fabricWrapper")

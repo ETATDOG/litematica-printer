@@ -2,6 +2,7 @@ package me.aleksilassila.litematica.printer.config.builder;
 
 import fi.dy.masa.malilib.config.options.ConfigInteger;
 import me.aleksilassila.litematica.printer.I18n;
+import me.aleksilassila.litematica.printer.config.PrinterConfigOptions;
 
 public class IntegerConfigBuilder extends BaseConfigBuilder<ConfigInteger, IntegerConfigBuilder> {
     private int defaultValue = 0;
@@ -43,7 +44,7 @@ public class IntegerConfigBuilder extends BaseConfigBuilder<ConfigInteger, Integ
 
     @Override
     public ConfigInteger build() {
-        ConfigInteger config = new ConfigInteger(i18n.getNameKey(), defaultValue, minValue, maxValue, useSlider, descKey);
+        ConfigInteger config = new PrinterConfigOptions.IntegerOption(i18n.getNameKey(), defaultValue, minValue, maxValue, useSlider, descKey);
         return buildExtension(config);
     }
 }

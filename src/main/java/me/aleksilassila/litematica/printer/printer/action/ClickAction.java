@@ -1,6 +1,5 @@
 package me.aleksilassila.litematica.printer.printer.action;
 
-import me.aleksilassila.litematica.printer.printer.ActionManager;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
@@ -12,9 +11,23 @@ import org.jetbrains.annotations.Nullable;
 
 public class ClickAction extends Action {
     @Override
-    public Action queueAction(@NotNull BlockPos blockPos, @NotNull Direction side, boolean useShift, @NotNull LocalPlayer player) {
-        ActionManager.INSTANCE.queueClick(blockPos, side, getSides().get(side), false);
-        return this;
+    public boolean queueAction(
+            @NotNull ActionPort actionBroker,
+            @NotNull BlockPos blockPos,
+            @NotNull Direction side,
+            boolean useShift,
+            @NotNull LocalPlayer player,
+            @Nullable Item[] expectedItems
+    ) {
+        return actionBroker.queueClick(
+                blockPos,
+                side,
+                getSides().get(side),
+                false,
+                this.clickRepeatCount,
+                expectedItems,
+                ActionPort.ActionSource.PRINT
+        );
     }
 
     @Override
@@ -34,7 +47,7 @@ public class ClickAction extends Action {
      */
     @Override
     public @Nullable Direction getValidSide(ClientLevel world, BlockPos pos) {
-        for (Direction side : getSides().keySet()) {
+        for (Direction side : getOrderedSides()) {
             return side;
         }
         return null;
